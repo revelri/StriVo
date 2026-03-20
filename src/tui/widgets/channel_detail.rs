@@ -3,7 +3,7 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Paragraph},
+    widgets::{Block, BorderType, Borders, Paragraph, Wrap},
 };
 
 use crate::app::{ActivePane, AppState};
@@ -26,7 +26,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut AppState) {
 
     let Some(channel) = app.selected_channel() else {
         let placeholder = Paragraph::new("Select a channel from the sidebar")
-            .style(Style::new().fg(Theme::GRAY))
+            .style(Style::new().fg(Theme::muted()))
             .block(block);
         frame.render_widget(placeholder, area);
         return;
@@ -35,11 +35,22 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut AppState) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let [info_area, thumbnail_area] = Layout::vertical([
-        Constraint::Length(7),
-        Constraint::Fill(1),
-    ])
-    .areas(inner);
+    // Responsive layout: horizontal if wide enough, else vertical
+    let (info_area, thumbnail_area) = if inner.width >= 70 {
+        let [info, thumb] = Layout::horizontal([
+            Constraint::Fill(1),
+            Constraint::Length(46),
+        ])
+        .areas(inner);
+        (info, thumb)
+    } else {
+        let [info, thumb] = Layout::vertical([
+            Constraint::Length(7),
+            Constraint::Fill(1),
+        ])
+        .areas(inner);
+        (info, thumb)
+    };
 
     // Stream info
     let title = channel
@@ -63,12 +74,12 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut AppState) {
         Span::styled(
             " LIVE ",
             Style::new()
-                .fg(Theme::BG)
-                .bg(Theme::GREEN)
+                .fg(Theme::bg())
+                .bg(Theme::green())
                 .add_modifier(Modifier::BOLD),
         )
     } else {
-        Span::styled(" OFFLINE ", Style::new().fg(Theme::FG).bg(Theme::DIM))
+        Span::styled(" OFFLINE ", Style::new().fg(Theme::fg()).bg(Theme::dim()))
     };
 
     // Check if currently recording
@@ -78,8 +89,8 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut AppState) {
         Span::styled(
             " REC ",
             Style::new()
-                .fg(Theme::BG)
-                .bg(Theme::RED)
+                .fg(Theme::bg())
+                .bg(Theme::red())
                 .add_modifier(Modifier::BOLD),
         )
     } else {
@@ -87,7 +98,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut AppState) {
     };
 
     let auto_indicator = if channel.auto_record {
-        Span::styled(" AUTO ", Style::new().fg(Theme::BG).bg(Theme::YELLOW))
+        Span::styled(" MON ", Style::new().fg(Theme::bg()).bg(Theme::secondary()))
     } else {
         Span::raw("")
     };
@@ -96,7 +107,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut AppState) {
         Line::from(vec![
             Span::styled(
                 &channel.display_name,
-                Style::new().fg(Theme::FG).add_modifier(Modifier::BOLD),
+                Style::new().fg(Theme::fg()).add_modifier(Modifier::BOLD),
             ),
             Span::raw("  "),
             status_indicator,
@@ -106,16 +117,16 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut AppState) {
             auto_indicator,
         ]),
         Line::raw(""),
-        Line::styled(title, Style::new().fg(Theme::FG)),
+        Line::styled(title, Style::new().fg(Theme::fg())),
         Line::from(vec![
-            Span::styled(category, Style::new().fg(Theme::BLUE)),
+            Span::styled(category, Style::new().fg(Theme::blue())),
             Span::styled(
                 if !viewers.is_empty() {
                     format!(" · {viewers}")
                 } else {
                     String::new()
                 },
-                Style::new().fg(Theme::GRAY),
+                Style::new().fg(Theme::muted()),
             ),
             Span::styled(
                 if !uptime.is_empty() {
@@ -123,23 +134,35 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut AppState) {
                 } else {
                     String::new()
                 },
-                Style::new().fg(Theme::GRAY),
+                Style::new().fg(Theme::muted()),
             ),
         ]),
         Line::raw(""),
         Line::styled(
             format!("Platform: {}", channel.platform),
-            Style::new().fg(Theme::GRAY),
+            Style::new().fg(Theme::muted()),
         ),
     ];
 
-    frame.render_widget(Paragraph::new(info_lines), info_area);
+    frame.render_widget(
+        Paragraph::new(info_lines).wrap(Wrap { trim: false }),
+        info_area,
+    );
 
-    // Render thumbnail if available
+    // Render thumbnail with rounded border
     let channel_id = channel.id.clone();
+    let thumb_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Theme::border())
+        .title(" Preview ")
+        .title_style(Style::new().fg(Theme::muted()));
+    let thumb_inner = thumb_block.inner(thumbnail_area);
+    frame.render_widget(thumb_block, thumbnail_area);
+
     if let Some(proto) = app.thumbnail_protocols.get_mut(&channel_id) {
         let image_widget = ratatui_image::StatefulImage::default();
-        frame.render_stateful_widget(image_widget, thumbnail_area, proto);
+        frame.render_stateful_widget(image_widget, thumb_inner, proto);
     }
 }
 

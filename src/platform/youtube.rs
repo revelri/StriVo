@@ -4,6 +4,7 @@ use serde::Deserialize;
 use tokio::sync::RwLock;
 use std::sync::Arc;
 
+use crate::app::AppEvent;
 use crate::config::credentials;
 use crate::platform::{ChannelEntry, Platform, PlatformKind};
 
@@ -115,6 +116,7 @@ pub struct YouTubePlatform {
     access_token: Arc<RwLock<Option<String>>>,
     refresh_token_value: Arc<RwLock<Option<String>>>,
     pub pending_device_code: Arc<RwLock<Option<DeviceCodeInfo>>>,
+    event_tx: Option<tokio::sync::mpsc::UnboundedSender<AppEvent>>,
 }
 
 #[allow(dead_code)]
@@ -138,7 +140,12 @@ impl YouTubePlatform {
             access_token: Arc::new(RwLock::new(None)),
             refresh_token_value: Arc::new(RwLock::new(None)),
             pending_device_code: Arc::new(RwLock::new(None)),
+            event_tx: None,
         }
+    }
+
+    pub fn set_event_tx(&mut self, tx: tokio::sync::mpsc::UnboundedSender<AppEvent>) {
+        self.event_tx = Some(tx);
     }
 
     pub async fn load_stored_tokens(&self) -> Result<bool> {
@@ -191,6 +198,14 @@ impl YouTubePlatform {
             user_code: resp.user_code.clone(),
             verification_url: resp.verification_url.clone(),
         });
+
+        if let Some(ref tx) = self.event_tx {
+            let _ = tx.send(AppEvent::device_code_required(
+                PlatformKind::YouTube,
+                resp.verification_url.clone(),
+                resp.user_code.clone(),
+            ));
+        }
 
         tracing::info!(
             "YouTube auth: go to {} and enter code: {}",
@@ -414,7 +429,7 @@ impl Platform for YouTubePlatform {
         PlatformKind::YouTube
     }
 
-    async fn authenticate(&mut self) -> Result<()> {
+    async fn authenticate(&self) -> Result<()> {
         if self.load_stored_tokens().await? {
             tracing::info!("YouTube: authenticated from stored tokens");
             return Ok(());
@@ -499,7 +514,7 @@ impl Platform for YouTubePlatform {
         Ok(all_live)
     }
 
-    async fn refresh_token(&mut self) -> Result<()> {
+    async fn refresh_token(&self) -> Result<()> {
         self.do_refresh_token().await
     }
 }

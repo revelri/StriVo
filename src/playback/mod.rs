@@ -14,7 +14,7 @@ impl MpvController {
         let pid = std::process::id();
         Self {
             child: None,
-            socket_path: format!("/tmp/streavo-mpv-{pid}.sock"),
+            socket_path: format!("/tmp/strivo-mpv-{pid}.sock"),
         }
     }
 

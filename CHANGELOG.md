@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to StreaVo will be documented in this file.
+All notable changes to StriVo will be documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 

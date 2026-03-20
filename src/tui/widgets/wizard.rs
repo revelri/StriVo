@@ -39,53 +39,53 @@ pub fn render(frame: &mut Frame, area: Rect) {
     let lines = vec![
         Line::raw(""),
         Line::from(Span::styled(
-            "  Welcome to StreaVo!",
-            Style::new().fg(Theme::PURPLE).add_modifier(Modifier::BOLD),
+            "  Welcome to StriVo!",
+            Style::new().fg(Theme::primary()).add_modifier(Modifier::BOLD),
         )),
         Line::raw(""),
         Line::styled(
             "  No platforms configured yet.",
-            Style::new().fg(Theme::FG),
+            Style::new().fg(Theme::fg()),
         ),
         Line::raw(""),
         Line::styled(
             "  To get started, add your platform credentials",
-            Style::new().fg(Theme::FG),
+            Style::new().fg(Theme::fg()),
         ),
         Line::styled(
             "  to the config file at:",
-            Style::new().fg(Theme::FG),
+            Style::new().fg(Theme::fg()),
         ),
         Line::raw(""),
         Line::styled(
             format!("  {}", crate::config::AppConfig::config_path().display()),
-            Style::new().fg(Theme::BLUE).add_modifier(Modifier::BOLD),
+            Style::new().fg(Theme::blue()).add_modifier(Modifier::BOLD),
         ),
         Line::raw(""),
         Line::styled(
             "  [twitch]",
-            Style::new().fg(Theme::TWITCH),
+            Style::new().fg(Theme::twitch()),
         ),
         Line::styled(
             "  client_id = \"your_client_id\"",
-            Style::new().fg(Theme::GRAY),
+            Style::new().fg(Theme::muted()),
         ),
         Line::styled(
             "  client_secret = \"your_secret\"",
-            Style::new().fg(Theme::GRAY),
+            Style::new().fg(Theme::muted()),
         ),
         Line::raw(""),
         Line::styled(
             "  [youtube]",
-            Style::new().fg(Theme::YOUTUBE),
+            Style::new().fg(Theme::youtube()),
         ),
         Line::styled(
             "  client_id = \"your_client_id\"",
-            Style::new().fg(Theme::GRAY),
+            Style::new().fg(Theme::muted()),
         ),
         Line::styled(
             "  client_secret = \"your_secret\"",
-            Style::new().fg(Theme::GRAY),
+            Style::new().fg(Theme::muted()),
         ),
         Line::raw(""),
         Line::from(vec![

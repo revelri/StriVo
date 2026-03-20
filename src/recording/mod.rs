@@ -1,5 +1,8 @@
 pub mod ffmpeg;
 pub mod job;
+pub mod scan;
+pub mod schedule;
+pub mod ytdlp;
 
 use anyhow::Result;
 use std::collections::HashMap;
@@ -13,9 +16,10 @@ use crate::config::AppConfig;
 use crate::platform::PlatformKind;
 use crate::recording::ffmpeg::{FfmpegBuilder, FfmpegProcess};
 use crate::recording::job::{RecordingJob, RecordingState};
+use crate::recording::ytdlp::YtDlpProcess;
 use crate::stream::resolver;
 
-#[derive(Debug)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum RecordingCommand {
     Start {
         channel_id: String,
@@ -24,18 +28,60 @@ pub enum RecordingCommand {
         transcode: bool,
         cookies_path: Option<PathBuf>,
         stream_title: Option<String>,
+        from_start: bool,
+        /// If provided, the recording manager uses this ID instead of generating a new one.
+        /// Used by the schedule manager to track job IDs for timed Stop commands.
+        job_id: Option<Uuid>,
     },
     Stop {
         job_id: Uuid,
     },
     StopAll,
+    DownloadVod {
+        url: String,
+        channel_name: String,
+        platform: PlatformKind,
+        output_path: PathBuf,
+        cookies_path: Option<PathBuf>,
+        post_title: Option<String>,
+    },
+}
+
+/// Unified recorder process — either FFmpeg or yt-dlp
+enum RecorderProcess {
+    Ffmpeg(FfmpegProcess),
+    YtDlp(YtDlpProcess),
+}
+
+impl RecorderProcess {
+    async fn stop(&mut self) -> Result<()> {
+        match self {
+            Self::Ffmpeg(p) => p.stop().await,
+            Self::YtDlp(p) => p.stop().await,
+        }
+    }
+
+    fn try_wait(&mut self) -> Result<Option<std::process::ExitStatus>> {
+        match self {
+            Self::Ffmpeg(p) => p.try_wait(),
+            Self::YtDlp(p) => p.try_wait(),
+        }
+    }
+
+    fn file_size(&self) -> u64 {
+        match self {
+            Self::Ffmpeg(p) => p.file_size(),
+            Self::YtDlp(p) => p.file_size(),
+        }
+    }
 }
 
 struct ActiveRecording {
     job: RecordingJob,
-    process: Option<FfmpegProcess>,
+    process: Option<RecorderProcess>,
     retry_count: u32,
     cookies_path: Option<PathBuf>,
+    from_start: bool,
 }
 
 pub async fn run_manager(
@@ -48,27 +94,27 @@ pub async fn run_manager(
     let mut poll_interval = tokio::time::interval(std::time::Duration::from_secs(2));
     // Channel for spawned resolve tasks to send back results
     let (resolve_tx, mut resolve_rx) =
-        mpsc::unbounded_channel::<(Uuid, Result<FfmpegProcess, String>)>();
+        mpsc::unbounded_channel::<(Uuid, Result<RecorderProcess, String>)>();
 
     loop {
         tokio::select! {
             Some(cmd) = cmd_rx.recv() => {
                 match cmd {
-                    RecordingCommand::Start { channel_id, channel_name, platform, transcode, cookies_path, stream_title } => {
+                    RecordingCommand::Start { channel_id, channel_name, platform, transcode, cookies_path, stream_title, from_start, job_id: requested_id } => {
                         // Check if already recording this channel
                         let already = active.values().any(|r| {
                             r.job.channel_id == channel_id
                                 && !matches!(r.job.state, RecordingState::Finished | RecordingState::Failed)
                         });
                         if already {
-                            let _ = event_tx.send(AppEvent::Error(
+                            let _ = event_tx.send(AppEvent::error(
                                 format!("Already recording {channel_name}")
                             ));
                             continue;
                         }
 
                         let output_path = build_output_path(&config, &channel_name, platform, stream_title.as_deref());
-                        let job = RecordingJob::new(
+                        let mut job = RecordingJob::new(
                             channel_id.clone(),
                             channel_name.clone(),
                             platform,
@@ -76,54 +122,83 @@ pub async fn run_manager(
                             transcode,
                             stream_title,
                         );
+                        if let Some(id) = requested_id {
+                            job.id = id;
+                        }
                         let job_id = job.id;
-                        let _ = event_tx.send(AppEvent::RecordingStarted { job: job.clone() });
+                        let _ = event_tx.send(AppEvent::recording_started(job.clone()));
 
                         active.insert(job_id, ActiveRecording {
                             job,
                             process: None,
                             retry_count: 0,
                             cookies_path: cookies_path.clone(),
+                            from_start,
                         });
 
-                        // Spawn resolve + start task
-                        let rtx = resolve_tx.clone();
-                        let etx = event_tx.clone();
-                        tokio::spawn(async move {
-                            match resolver::resolve_stream_url(platform, &channel_name, cookies_path.as_deref()).await {
-                                Ok(stream_info) => {
-                                    let _ = etx.send(AppEvent::StreamUrlResolved {
-                                        channel_id: channel_id.clone(),
-                                        url: stream_info.url.clone(),
-                                    });
-                                    match FfmpegBuilder::new(stream_info.url, output_path)
-                                        .transcode(transcode)
-                                        .build()
-                                    {
-                                        Ok(process) => {
-                                            let _ = rtx.send((job_id, Ok(process)));
-                                        }
-                                        Err(e) => {
-                                            let _ = rtx.send((job_id, Err(format!("FFmpeg failed: {e}"))));
-                                        }
+                        // YouTube + from_start: use yt-dlp directly (no URL resolution needed)
+                        if platform == PlatformKind::YouTube && from_start {
+                            let rtx = resolve_tx.clone();
+                            let url = if channel_name.starts_with("UC") && channel_name.len() == 24 {
+                                format!("https://www.youtube.com/channel/{channel_name}/live")
+                            } else {
+                                format!("https://www.youtube.com/@{channel_name}/live")
+                            };
+                            let cookies = cookies_path.clone();
+                            tokio::spawn(async move {
+                                match YtDlpProcess::new(&url, output_path, cookies.as_deref()) {
+                                    Ok(process) => {
+                                        let _ = rtx.send((job_id, Ok(RecorderProcess::YtDlp(process))));
+                                    }
+                                    Err(e) => {
+                                        let _ = rtx.send((job_id, Err(format!("yt-dlp failed: {e}"))));
                                     }
                                 }
-                                Err(e) => {
-                                    let _ = rtx.send((job_id, Err(format!("Resolve failed: {e}"))));
-                                }
+                            });
+                        } else {
+                            // Normal path: resolve URL then spawn FFmpeg
+                            if from_start && platform == PlatformKind::Twitch {
+                                tracing::warn!("Record from start not supported for Twitch, falling back to normal recording");
                             }
-                        });
+
+                            let rtx = resolve_tx.clone();
+                            let etx = event_tx.clone();
+                            tokio::spawn(async move {
+                                match resolver::resolve_stream_url(platform, &channel_name, cookies_path.as_deref()).await {
+                                    Ok(stream_info) => {
+                                        let _ = etx.send(AppEvent::stream_url_resolved(
+                                            channel_id.clone(),
+                                            stream_info.url.clone(),
+                                        ));
+                                        match FfmpegBuilder::new(stream_info.url, output_path)
+                                            .transcode(transcode)
+                                            .build()
+                                        {
+                                            Ok(process) => {
+                                                let _ = rtx.send((job_id, Ok(RecorderProcess::Ffmpeg(process))));
+                                            }
+                                            Err(e) => {
+                                                let _ = rtx.send((job_id, Err(format!("FFmpeg failed: {e}"))));
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        let _ = rtx.send((job_id, Err(format!("Resolve failed: {e}"))));
+                                    }
+                                }
+                            });
+                        }
                     }
                     RecordingCommand::Stop { job_id } => {
                         if let Some(mut rec) = active.remove(&job_id) {
                             rec.job.state = RecordingState::Stopping;
                             if let Some(ref mut proc) = rec.process {
                                 if let Err(e) = proc.stop().await {
-                                    tracing::error!("Failed to stop ffmpeg: {e}");
+                                    tracing::error!("Failed to stop recorder: {e}");
                                 }
                             }
                             rec.job.state = RecordingState::Finished;
-                            let _ = event_tx.send(AppEvent::RecordingFinished { job_id });
+                            let _ = event_tx.send(AppEvent::recording_finished(job_id, RecordingState::Finished, None));
                         }
                     }
                     RecordingCommand::StopAll => {
@@ -136,11 +211,43 @@ pub async fn run_manager(
                                         proc.stop().await.ok();
                                     }
                                     rec.job.state = RecordingState::Finished;
-                                    let _ = event_tx.send(AppEvent::RecordingFinished { job_id: id });
+                                    let _ = event_tx.send(AppEvent::recording_finished(id, RecordingState::Finished, None));
                                 }
                             }
                         }
-                        let _ = event_tx.send(AppEvent::AllRecordingsStopped);
+                        let _ = event_tx.send(AppEvent::all_recordings_stopped());
+                    }
+                    RecordingCommand::DownloadVod { url, channel_name, platform, output_path, cookies_path, post_title } => {
+                        let job = RecordingJob::new(
+                            String::new(),
+                            channel_name,
+                            platform,
+                            output_path.clone(),
+                            false,
+                            post_title,
+                        );
+                        let job_id = job.id;
+                        let _ = event_tx.send(AppEvent::recording_started(job.clone()));
+
+                        active.insert(job_id, ActiveRecording {
+                            job,
+                            process: None,
+                            retry_count: 0,
+                            cookies_path: cookies_path.clone(),
+                            from_start: false,
+                        });
+
+                        let rtx = resolve_tx.clone();
+                        tokio::spawn(async move {
+                            match YtDlpProcess::new(&url, output_path, cookies_path.as_deref()) {
+                                Ok(process) => {
+                                    let _ = rtx.send((job_id, Ok(RecorderProcess::YtDlp(process))));
+                                }
+                                Err(e) => {
+                                    let _ = rtx.send((job_id, Err(format!("yt-dlp VOD download failed: {e}"))));
+                                }
+                            }
+                        });
                     }
                 }
             }
@@ -155,8 +262,8 @@ pub async fn run_manager(
                         Err(e) => {
                             rec.job.state = RecordingState::Failed;
                             rec.job.error = Some(e.clone());
-                            let _ = event_tx.send(AppEvent::RecordingFinished { job_id });
-                            let _ = event_tx.send(AppEvent::Error(e));
+                            let _ = event_tx.send(AppEvent::recording_finished(job_id, RecordingState::Failed, Some(e.clone())));
+                            let _ = event_tx.send(AppEvent::error(e));
                         }
                     }
                 }
@@ -186,22 +293,19 @@ pub async fn run_manager(
                         rec.job.duration_secs = (chrono::Utc::now() - rec.job.started_at)
                             .num_seconds() as f64;
 
-                        let _ = event_tx.send(AppEvent::RecordingProgress {
-                            job_id: *id,
-                            bytes_written: rec.job.bytes_written,
-                            duration_secs: rec.job.duration_secs,
-                        });
+                        let _ = event_tx.send(AppEvent::recording_progress(*id, rec.job.bytes_written, rec.job.duration_secs));
 
                         match proc.try_wait() {
                             Ok(Some(status)) => {
                                 if status.success() {
                                     rec.job.state = RecordingState::Finished;
-                                    finished.push(*id);
-                                } else if rec.retry_count < 3 {
+                                    finished.push((*id, RecordingState::Finished, None));
+                                } else if !rec.from_start && rec.retry_count < 3 {
+                                    // Retry only for FFmpeg-based recordings
                                     rec.retry_count += 1;
                                     let wait_secs = 2u64.pow(rec.retry_count);
                                     tracing::warn!(
-                                        "ffmpeg exited with {status}, retry {}/3 in {wait_secs}s for {}",
+                                        "Recorder exited with {status}, retry {}/3 in {wait_secs}s for {}",
                                         rec.retry_count,
                                         rec.job.channel_name
                                     );
@@ -235,7 +339,7 @@ pub async fn run_manager(
                                                     .transcode(job.transcode)
                                                     .build()
                                                 {
-                                                    Ok(p) => { let _ = rtx.send((jid, Ok(p))); }
+                                                    Ok(p) => { let _ = rtx.send((jid, Ok(RecorderProcess::Ffmpeg(p)))); }
                                                     Err(e) => { let _ = rtx.send((jid, Err(format!("{e}")))); }
                                                 }
                                             }
@@ -245,21 +349,22 @@ pub async fn run_manager(
                                         }
                                     });
                                 } else {
+                                    let error_msg = format!("Recorder exited: {status} after {} retries", rec.retry_count);
                                     rec.job.state = RecordingState::Failed;
-                                    rec.job.error = Some(format!("ffmpeg exited: {status} after 3 retries"));
-                                    finished.push(*id);
+                                    rec.job.error = Some(error_msg.clone());
+                                    finished.push((*id, RecordingState::Failed, Some(error_msg)));
                                 }
                             }
                             Ok(None) => {} // still running
                             Err(e) => {
-                                tracing::error!("Failed to check ffmpeg status: {e}");
+                                tracing::error!("Failed to check recorder status: {e}");
                             }
                         }
                     }
                 }
-                for id in finished {
+                for (id, final_state, error) in finished {
                     active.remove(&id);
-                    let _ = event_tx.send(AppEvent::RecordingFinished { job_id: id });
+                    let _ = event_tx.send(AppEvent::recording_finished(id, final_state, error));
                 }
             }
         }
@@ -277,6 +382,7 @@ pub fn build_output_path(
     let platform_str = match platform {
         PlatformKind::Twitch => "twitch",
         PlatformKind::YouTube => "youtube",
+        PlatformKind::Patreon => "patreon",
     };
 
     // Sanitize stream title for filesystem safety

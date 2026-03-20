@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 
-const SERVICE_NAME: &str = "streavo";
+const SERVICE_NAME: &str = "strivo";
 
 pub fn store_secret(key: &str, value: &str) -> Result<()> {
     let entry = keyring::Entry::new(SERVICE_NAME, key)

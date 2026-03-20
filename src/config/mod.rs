@@ -14,12 +14,19 @@ pub struct AppConfig {
 
     pub twitch: Option<TwitchConfig>,
     pub youtube: Option<YouTubeConfig>,
+    pub patreon: Option<PatreonConfig>,
 
     #[serde(default)]
     pub recording: RecordingConfig,
 
+    #[serde(default = "default_theme")]
+    pub theme: String,
+
     #[serde(default)]
     pub auto_record_channels: Vec<AutoRecordEntry>,
+
+    #[serde(default)]
+    pub schedule: Vec<ScheduleEntry>,
 
     /// Tracks the path this config was loaded from, so save() can use it
     #[serde(skip)]
@@ -37,6 +44,18 @@ pub struct YouTubeConfig {
     pub client_id: String,
     pub client_secret: String,
     pub cookies_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PatreonConfig {
+    pub client_id: String,
+    pub client_secret: String,
+    #[serde(default = "default_patreon_poll_interval")]
+    pub poll_interval_secs: u64,
+}
+
+fn default_patreon_poll_interval() -> u64 {
+    300
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -64,9 +83,27 @@ pub struct AutoRecordEntry {
     pub channel_name: String,
 }
 
+/// Schedule-based recording entry.
+/// Uses cron syntax for time-based recordings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScheduleEntry {
+    pub channel: String,
+    pub cron: String,
+    #[serde(default = "default_schedule_duration")]
+    pub duration: String,
+}
+
+fn default_schedule_duration() -> String {
+    "4h".to_string()
+}
+
+fn default_theme() -> String {
+    "neon".to_string()
+}
+
 fn default_recording_dir() -> PathBuf {
     directories::UserDirs::new()
-        .map(|d| d.home_dir().join("Videos").join("StreaVo"))
+        .map(|d| d.home_dir().join("Videos").join("StriVo"))
         .unwrap_or_else(|| PathBuf::from("./recordings"))
 }
 
@@ -85,8 +122,11 @@ impl Default for AppConfig {
             poll_interval_secs: default_poll_interval(),
             twitch: None,
             youtube: None,
+            patreon: None,
             recording: RecordingConfig::default(),
+            theme: default_theme(),
             auto_record_channels: Vec::new(),
+            schedule: Vec::new(),
             config_path: None,
         }
     }
@@ -94,7 +134,7 @@ impl Default for AppConfig {
 
 impl AppConfig {
     pub fn config_dir() -> PathBuf {
-        directories::ProjectDirs::from("", "", "streavo")
+        directories::ProjectDirs::from("", "", "strivo")
             .map(|d| d.config_dir().to_path_buf())
             .unwrap_or_else(|| PathBuf::from("."))
     }
@@ -104,13 +144,13 @@ impl AppConfig {
     }
 
     pub fn cache_dir() -> PathBuf {
-        directories::ProjectDirs::from("", "", "streavo")
+        directories::ProjectDirs::from("", "", "strivo")
             .map(|d| d.cache_dir().to_path_buf())
             .unwrap_or_else(|| PathBuf::from(".cache"))
     }
 
     pub fn state_dir() -> PathBuf {
-        directories::ProjectDirs::from("", "", "streavo")
+        directories::ProjectDirs::from("", "", "strivo")
             .map(|d| {
                 d.state_dir()
                     .unwrap_or(d.data_dir())

@@ -42,6 +42,10 @@ pub fn render(frame: &mut Frame, area: Rect, app: &AppState) {
             },
         ),
         (
+            "Theme",
+            Theme::current_name(),
+        ),
+        (
             "Twitch",
             if app.config.twitch.is_some() {
                 if app.twitch_connected {
@@ -73,9 +77,9 @@ pub fn render(frame: &mut Frame, area: Rect, app: &AppState) {
             ListItem::new(Line::from(vec![
                 Span::styled(
                     format!("  {label}: "),
-                    Style::new().fg(Theme::BLUE).add_modifier(Modifier::BOLD),
+                    Style::new().fg(Theme::blue()).add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(value.as_str(), Style::new().fg(Theme::FG)),
+                Span::styled(value.as_str(), Style::new().fg(Theme::fg())),
             ]))
         })
         .collect();
@@ -87,13 +91,13 @@ pub fn render(frame: &mut Frame, area: Rect, app: &AppState) {
         Span::raw(" Config: "),
         Span::styled(
             crate::config::AppConfig::config_path().to_string_lossy().to_string(),
-            Style::new().fg(Theme::GRAY),
+            Style::new().fg(Theme::muted()),
         ),
     ]);
 
     let list = List::new(items)
         .block(block.title_bottom(config_path_hint))
-        .highlight_style(Style::new().fg(Theme::BG).bg(Theme::BLUE));
+        .highlight_style(Style::new().fg(Theme::bg()).bg(Theme::blue()));
 
     frame.render_stateful_widget(list, area, &mut state);
 }

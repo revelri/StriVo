@@ -1,0 +1,384 @@
+use anyhow::{Result, bail};
+use reqwest::Client;
+use serde::Deserialize;
+use std::sync::Arc;
+use tokio::sync::RwLock;
+
+use crate::app::AppEvent;
+use crate::config::credentials;
+use crate::platform::PlatformKind;
+
+const PATREON_API_URL: &str = "https://www.patreon.com/api/oauth2/v2";
+const PATREON_AUTH_URL: &str = "https://www.patreon.com/oauth2/authorize";
+const PATREON_TOKEN_URL: &str = "https://www.patreon.com/api/oauth2/token";
+
+#[allow(dead_code)]
+#[derive(Debug, Deserialize)]
+struct TokenResponse {
+    access_token: String,
+    refresh_token: Option<String>,
+    expires_in: Option<u64>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct PatreonCreator {
+    pub campaign_id: String,
+    pub name: String,
+    pub vanity: Option<String>,
+    pub url: String,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct PatreonPost {
+    pub id: String,
+    pub campaign_id: String,
+    pub title: String,
+    pub url: String,
+    pub published_at: String,
+    pub embed_url: Option<String>,
+}
+
+pub struct PatreonClient {
+    client: Client,
+    client_id: String,
+    client_secret: String,
+    access_token: Arc<RwLock<Option<String>>>,
+    refresh_token_value: Arc<RwLock<Option<String>>>,
+    event_tx: Option<tokio::sync::mpsc::UnboundedSender<AppEvent>>,
+}
+
+impl PatreonClient {
+    pub fn new(client_id: String, client_secret: String) -> Self {
+        Self {
+            client: Client::new(),
+            client_id,
+            client_secret,
+            access_token: Arc::new(RwLock::new(None)),
+            refresh_token_value: Arc::new(RwLock::new(None)),
+            event_tx: None,
+        }
+    }
+
+    pub fn set_event_tx(&mut self, tx: tokio::sync::mpsc::UnboundedSender<AppEvent>) {
+        self.event_tx = Some(tx);
+    }
+
+    /// Try to load and validate stored tokens, returning true if successful.
+    pub async fn load_stored_tokens(&self) -> Result<bool> {
+        if let Some(token) = credentials::get_secret("patreon_access_token")? {
+            *self.access_token.write().await = Some(token);
+            if let Some(refresh) = credentials::get_secret("patreon_refresh_token")? {
+                *self.refresh_token_value.write().await = Some(refresh);
+            }
+            // Validate
+            if self.validate_token().await? {
+                return Ok(true);
+            }
+            // Try refresh
+            if self.refresh_token_value.read().await.is_some() {
+                if self.do_refresh_token().await.is_ok() {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    async fn validate_token(&self) -> Result<bool> {
+        let token = self.access_token.read().await;
+        let Some(token) = token.as_ref() else {
+            return Ok(false);
+        };
+        let resp = self
+            .client
+            .get(format!("{PATREON_API_URL}/identity"))
+            .header("Authorization", format!("Bearer {token}"))
+            .send()
+            .await?;
+        Ok(resp.status().is_success())
+    }
+
+    /// OAuth2 authorization code flow via local HTTP listener.
+    pub async fn authorize(&self) -> Result<()> {
+        if self.load_stored_tokens().await? {
+            tracing::info!("Patreon: authenticated from stored tokens");
+            return Ok(());
+        }
+
+        // Start local HTTP listener
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let port = listener.local_addr()?.port();
+        let redirect_uri = format!("http://127.0.0.1:{port}/callback");
+
+        let auth_url = format!(
+            "{PATREON_AUTH_URL}?response_type=code&client_id={}&redirect_uri={}&scope=identity%20identity.memberships",
+            self.client_id,
+            urlencoding(&redirect_uri),
+        );
+
+        tracing::info!("Patreon auth: open {auth_url}");
+
+        if let Some(ref tx) = self.event_tx {
+            let _ = tx.send(AppEvent::device_code_required(
+                PlatformKind::Patreon,
+                auth_url.clone(),
+                "Open URL in browser".to_string(),
+            ));
+        }
+
+        // Wait for callback (with timeout)
+        let code = tokio::time::timeout(
+            std::time::Duration::from_secs(300),
+            wait_for_auth_code(listener),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("Patreon auth timed out"))??;
+
+        // Exchange code for tokens
+        let resp = self
+            .client
+            .post(PATREON_TOKEN_URL)
+            .form(&[
+                ("code", code.as_str()),
+                ("grant_type", "authorization_code"),
+                ("client_id", self.client_id.as_str()),
+                ("client_secret", self.client_secret.as_str()),
+                ("redirect_uri", redirect_uri.as_str()),
+            ])
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            let body = resp.text().await?;
+            bail!("Patreon token exchange failed: {body}");
+        }
+
+        let token: TokenResponse = resp.json().await?;
+        credentials::store_secret("patreon_access_token", &token.access_token)?;
+        if let Some(ref refresh) = token.refresh_token {
+            credentials::store_secret("patreon_refresh_token", refresh)?;
+            *self.refresh_token_value.write().await = Some(refresh.clone());
+        }
+        *self.access_token.write().await = Some(token.access_token);
+
+        if let Some(ref tx) = self.event_tx {
+            let _ = tx.send(AppEvent::platform_authenticated(PlatformKind::Patreon));
+        }
+
+        Ok(())
+    }
+
+    async fn do_refresh_token(&self) -> Result<()> {
+        let refresh = self.refresh_token_value.read().await.clone();
+        let Some(refresh) = refresh else {
+            bail!("No Patreon refresh token");
+        };
+
+        let resp = self
+            .client
+            .post(PATREON_TOKEN_URL)
+            .form(&[
+                ("grant_type", "refresh_token"),
+                ("refresh_token", refresh.as_str()),
+                ("client_id", self.client_id.as_str()),
+                ("client_secret", self.client_secret.as_str()),
+            ])
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            bail!("Patreon token refresh failed: {}", resp.status());
+        }
+
+        let token: TokenResponse = resp.json().await?;
+        credentials::store_secret("patreon_access_token", &token.access_token)?;
+        if let Some(ref new_refresh) = token.refresh_token {
+            credentials::store_secret("patreon_refresh_token", new_refresh)?;
+            *self.refresh_token_value.write().await = Some(new_refresh.clone());
+        }
+        *self.access_token.write().await = Some(token.access_token);
+        Ok(())
+    }
+
+    async fn api_get(&self, url: &str) -> Result<serde_json::Value> {
+        let token = self.access_token.read().await.clone();
+        let Some(token) = token else {
+            bail!("Patreon not authenticated");
+        };
+
+        let resp = self
+            .client
+            .get(url)
+            .header("Authorization", format!("Bearer {token}"))
+            .send()
+            .await?;
+
+        if resp.status().as_u16() == 401 {
+            drop(resp);
+            self.do_refresh_token().await?;
+            let token = self.access_token.read().await.clone()
+                .ok_or_else(|| anyhow::anyhow!("No access token after refresh"))?;
+            let resp = self
+                .client
+                .get(url)
+                .header("Authorization", format!("Bearer {token}"))
+                .send()
+                .await?;
+            Ok(resp.json().await?)
+        } else {
+            Ok(resp.json().await?)
+        }
+    }
+
+    /// Fetch campaigns the user supports (pledged creators).
+    pub async fn fetch_pledged_creators(&self) -> Result<Vec<PatreonCreator>> {
+        let url = format!(
+            "{PATREON_API_URL}/identity?include=memberships.campaign&fields%5Bcampaign%5D=vanity,url,creation_name"
+        );
+        let data = self.api_get(&url).await?;
+
+        let mut creators = Vec::new();
+        if let Some(included) = data.get("included").and_then(|v| v.as_array()) {
+            for item in included {
+                if item.get("type").and_then(|t| t.as_str()) == Some("campaign") {
+                    let id = item.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let attrs = item.get("attributes");
+                    let name = attrs
+                        .and_then(|a| a.get("creation_name"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("Unknown")
+                        .to_string();
+                    let vanity = attrs
+                        .and_then(|a| a.get("vanity"))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                    let url = attrs
+                        .and_then(|a| a.get("url"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+
+                    if !id.is_empty() {
+                        creators.push(PatreonCreator {
+                            campaign_id: id,
+                            name,
+                            vanity,
+                            url,
+                        });
+                    }
+                }
+            }
+        }
+
+        Ok(creators)
+    }
+
+    /// Fetch recent video posts from a campaign.
+    pub async fn fetch_posts(
+        &self,
+        campaign_id: &str,
+        since: Option<&chrono::DateTime<chrono::Utc>>,
+    ) -> Result<Vec<PatreonPost>> {
+        let mut url = format!(
+            "{PATREON_API_URL}/campaigns/{campaign_id}/posts?fields%5Bpost%5D=title,url,published_at,embed&filter%5Bis_by_creator%5D=true"
+        );
+        if let Some(since) = since {
+            url.push_str(&format!(
+                "&filter%5Bpublished_at%5D%5Bgte%5D={}",
+                since.to_rfc3339()
+            ));
+        }
+
+        let data = self.api_get(&url).await?;
+        let mut posts = Vec::new();
+
+        if let Some(items) = data.get("data").and_then(|v| v.as_array()) {
+            for item in items {
+                let id = item.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let attrs = item.get("attributes");
+                let title = attrs
+                    .and_then(|a| a.get("title"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Untitled")
+                    .to_string();
+                let post_url = attrs
+                    .and_then(|a| a.get("url"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let published_at = attrs
+                    .and_then(|a| a.get("published_at"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let embed_url = attrs
+                    .and_then(|a| a.get("embed"))
+                    .and_then(|v| v.get("url"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+
+                // Only include posts that have video embeds
+                if embed_url.is_some() && !id.is_empty() {
+                    posts.push(PatreonPost {
+                        id,
+                        campaign_id: campaign_id.to_string(),
+                        title,
+                        url: post_url,
+                        published_at,
+                        embed_url,
+                    });
+                }
+            }
+        }
+
+        Ok(posts)
+    }
+
+    pub async fn is_authenticated(&self) -> bool {
+        self.access_token.read().await.is_some()
+    }
+}
+
+/// Simple URL encoding for OAuth redirect URI
+fn urlencoding(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '~' => c.to_string(),
+            _ => format!("%{:02X}", c as u8),
+        })
+        .collect()
+}
+
+/// Wait for the OAuth callback on the local listener, extract the auth code.
+async fn wait_for_auth_code(listener: tokio::net::TcpListener) -> Result<String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let (mut stream, _) = listener.accept().await?;
+    let mut buf = vec![0u8; 4096];
+    let n = stream.read(&mut buf).await?;
+    let request = String::from_utf8_lossy(&buf[..n]);
+
+    // Parse the code from "GET /callback?code=xxx HTTP/1.1"
+    let code = request
+        .lines()
+        .next()
+        .and_then(|line| {
+            let path = line.split_whitespace().nth(1)?;
+            let query = path.split('?').nth(1)?;
+            for param in query.split('&') {
+                if let Some(("code", value)) = param.split_once('=') {
+                    return Some(value.to_string());
+                }
+            }
+            None
+        })
+        .ok_or_else(|| anyhow::anyhow!("No auth code in callback"))?;
+
+    // Send response
+    let response = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<html><body><h2>StriVo: Patreon authorized!</h2><p>You can close this tab.</p></body></html>";
+    stream.write_all(response.as_bytes()).await?;
+
+    Ok(code)
+}

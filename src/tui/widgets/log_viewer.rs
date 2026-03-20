@@ -44,7 +44,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &AppState) {
         .border_style(border_style)
         .title(title)
         .title_style(if app.log_auto_scroll {
-            Style::new().fg(Theme::GREEN).add_modifier(Modifier::BOLD)
+            Style::new().fg(Theme::green()).add_modifier(Modifier::BOLD)
         } else {
             Theme::title()
         })
@@ -52,7 +52,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &AppState) {
 
     if app.log_lines.is_empty() {
         let placeholder = Paragraph::new("  No log entries yet. Log file will appear here as events occur.")
-            .style(Style::new().fg(Theme::GRAY))
+            .style(Style::new().fg(Theme::muted()))
             .block(block);
         frame.render_widget(placeholder, area);
         return;
@@ -91,8 +91,8 @@ pub fn render(frame: &mut Frame, area: Rect, app: &AppState) {
         let mut scrollbar_state = ScrollbarState::new(total.saturating_sub(inner_height))
             .position(start);
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-            .thumb_style(Style::new().fg(Theme::PURPLE))
-            .track_style(Style::new().fg(Theme::DIM));
+            .thumb_style(Style::new().fg(Theme::primary()))
+            .track_style(Style::new().fg(Theme::dim()));
         frame.render_stateful_widget(scrollbar, scrollbar_area, &mut scrollbar_state);
     }
 }
@@ -100,17 +100,17 @@ pub fn render(frame: &mut Frame, area: Rect, app: &AppState) {
 fn colorize_log_line(line: &str) -> Line<'_> {
     // Color based on log level (Dracula neon palette)
     let style = if line.contains(" ERROR ") {
-        Style::new().fg(Theme::RED)
+        Style::new().fg(Theme::red())
     } else if line.contains(" WARN ") {
-        Style::new().fg(Theme::YELLOW)
+        Style::new().fg(Theme::secondary())
     } else if line.contains(" INFO ") {
-        Style::new().fg(Theme::FG)
+        Style::new().fg(Theme::fg())
     } else if line.contains(" DEBUG ") {
-        Style::new().fg(Theme::GRAY)
+        Style::new().fg(Theme::muted())
     } else if line.contains(" TRACE ") {
-        Style::new().fg(Theme::DIM)
+        Style::new().fg(Theme::dim())
     } else {
-        Style::new().fg(Theme::GRAY)
+        Style::new().fg(Theme::muted())
     };
 
     Line::styled(line, style)

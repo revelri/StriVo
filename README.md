@@ -1,4 +1,4 @@
-# StreaVo
+# StriVo
 
 TUI Live Stream PVR for Twitch and YouTube. Monitor channels, automatically record live streams, and play them back — all from your terminal.
 
@@ -34,19 +34,19 @@ TUI Live Stream PVR for Twitch and YouTube. Monitor channels, automatically reco
 ## Installation
 
 ```sh
-git clone https://github.com/revelri/StreaVo.git
-cd StreaVo
+git clone https://github.com/revelri/StriVo.git
+cd StriVo
 cargo build --release
 ```
 
-The binary lands at `target/release/streavo`.
+The binary lands at `target/release/strivo`.
 
 ## Usage
 
 ### Launch the TUI
 
 ```sh
-streavo
+strivo
 ```
 
 Use arrow keys and Enter to navigate the sidebar. The setup wizard runs on first launch to configure platform credentials and recording directory.
@@ -55,16 +55,16 @@ Use arrow keys and Enter to navigate the sidebar. The setup wizard runs on first
 
 ```sh
 # Configuration
-streavo config list            # show all settings
-streavo config path            # print config file location
-streavo config get <key>       # read a value
-streavo config set <key> <val> # write a value
-streavo config reset           # restore defaults (keeps credentials)
+strivo config list            # show all settings
+strivo config path            # print config file location
+strivo config get <key>       # read a value
+strivo config set <key> <val> # write a value
+strivo config reset           # restore defaults (keeps credentials)
 
 # Logging
-streavo log path               # print log file location
-streavo log clear              # wipe the log
-streavo log tail [-l 100]      # live-tail the log file
+strivo log path               # print log file location
+strivo log clear              # wipe the log
+strivo log tail [-l 100]      # live-tail the log file
 ```
 
 ### Global flags
@@ -76,10 +76,10 @@ streavo log tail [-l 100]      # live-tail the log file
 
 ## Configuration
 
-Config lives at `~/.config/streavo/config.toml` (XDG on Linux, platform-native elsewhere).
+Config lives at `~/.config/strivo/config.toml` (XDG on Linux, platform-native elsewhere).
 
 ```toml
-recording_dir = "/home/you/Videos/StreaVo"
+recording_dir = "/home/you/Videos/StriVo"
 poll_interval_secs = 60
 
 [twitch]
