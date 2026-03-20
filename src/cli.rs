@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 
 #[derive(Parser, Debug)]
-#[command(name = "streavo", version, about = "TUI Live Stream PVR")]
+#[command(name = "strivo", version, about = "TUI Live Stream PVR")]
 pub struct Args {
     /// Path to config file
     #[arg(short, long, global = true)]
@@ -17,6 +17,14 @@ pub struct Args {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
+    /// Run background daemon (foreground, for systemd)
+    Daemon,
+    /// Install and start systemd user service
+    Enable,
+    /// Stop and remove systemd user service
+    Disable,
+    /// Check if daemon is running
+    Status,
     /// Manage configuration
     Config {
         #[command(subcommand)]
@@ -26,6 +34,11 @@ pub enum Command {
     Log {
         #[command(subcommand)]
         action: LogAction,
+    },
+    /// Search recordings by title, channel, or platform
+    Search {
+        /// Search query (fuzzy match against filenames and metadata)
+        query: String,
     },
 }
 
@@ -38,7 +51,8 @@ pub enum ConfigAction {
     /// Get a specific config value
     Get {
         /// Config key (recording_dir, poll_interval, transcode, filename_template,
-        /// twitch.client_id, youtube.client_id, youtube.client_secret, youtube.cookies_path)
+        /// twitch.client_id, youtube.client_id, youtube.client_secret, youtube.cookies_path,
+        /// patreon.client_id, patreon.client_secret, patreon.poll_interval)
         key: String,
     },
     /// Set a config value and save

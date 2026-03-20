@@ -13,6 +13,7 @@ pub async fn resolve_stream_url(
     match platform {
         PlatformKind::Twitch => resolve_twitch(channel_name).await,
         PlatformKind::YouTube => resolve_youtube(channel_name, cookies_path).await,
+        PlatformKind::Patreon => bail!("Patreon does not support live streams"),
     }
 }
 
@@ -21,7 +22,7 @@ async fn resolve_twitch(channel_name: &str) -> Result<StreamInfo> {
 
     // Try streamlink first
     let output = Command::new("streamlink")
-        .args(["--stream-url", &url, "best"])
+        .args(["--stream-url", "--twitch-disable-ads", &url, "best"])
         .output()
         .await;
 

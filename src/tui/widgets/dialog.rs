@@ -40,8 +40,9 @@ pub fn render_help(frame: &mut Frame, area: Rect) {
         ("Enter/l", "Select / expand"),
         ("Esc/h", "Go back"),
         ("r", "Start recording"),
+        ("R", "Record from start (YT)"),
         ("w", "Watch in mpv"),
-        ("a", "Toggle auto-record"),
+        ("a", "Toggle monitor"),
         ("t", "Toggle transcode mode"),
         ("s", "Settings"),
         ("L", "Recording list"),
@@ -56,10 +57,10 @@ pub fn render_help(frame: &mut Frame, area: Rect) {
             Span::raw("  "),
             Span::styled(
                 format!("{key:>10}"),
-                Style::new().fg(Theme::YELLOW).add_modifier(Modifier::BOLD),
+                Style::new().fg(Theme::secondary()).add_modifier(Modifier::BOLD),
             ),
             Span::raw("  "),
-            Span::styled(desc, Style::new().fg(Theme::FG)),
+            Span::styled(desc, Style::new().fg(Theme::fg())),
         ]));
     }
 
@@ -86,9 +87,9 @@ pub fn render_confirm(frame: &mut Frame, area: Rect, message: &str) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(Theme::YELLOW))
+        .border_style(Style::new().fg(Theme::secondary()))
         .title(" Confirm ")
-        .title_style(Style::new().fg(Theme::YELLOW).add_modifier(Modifier::BOLD));
+        .title_style(Style::new().fg(Theme::secondary()).add_modifier(Modifier::BOLD));
 
     let inner = block.inner(center);
     frame.render_widget(block, center);
@@ -97,7 +98,7 @@ pub fn render_confirm(frame: &mut Frame, area: Rect, message: &str) {
         Line::raw(""),
         Line::styled(
             format!("  {message}"),
-            Style::new().fg(Theme::FG),
+            Style::new().fg(Theme::fg()),
         ),
         Line::raw(""),
         Line::from(vec![

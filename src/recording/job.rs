@@ -1,8 +1,9 @@
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RecordingState {
     ResolvingUrl,
     Recording,
@@ -23,7 +24,7 @@ impl std::fmt::Display for RecordingState {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecordingJob {
     pub id: Uuid,
     pub channel_id: String,
@@ -60,6 +61,32 @@ impl RecordingJob {
             bytes_written: 0,
             duration_secs: 0.0,
             transcode,
+            error: None,
+            stream_title,
+            watched: false,
+        }
+    }
+
+    /// Create a RecordingJob from an existing file on disk (for scan results).
+    pub fn from_file(
+        path: PathBuf,
+        channel_name: String,
+        platform: crate::platform::PlatformKind,
+        stream_title: Option<String>,
+        started_at: DateTime<Utc>,
+    ) -> Self {
+        let bytes_written = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        Self {
+            id: Uuid::new_v4(),
+            channel_id: String::new(),
+            channel_name,
+            platform,
+            state: RecordingState::Finished,
+            output_path: path,
+            started_at,
+            bytes_written,
+            duration_secs: 0.0,
+            transcode: false,
             error: None,
             stream_title,
             watched: false,

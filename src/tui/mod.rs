@@ -57,7 +57,7 @@ async fn run_loop(
         // Drain backend events
         while let Ok(event) = rx.try_recv() {
             // Check for channels updated to trigger thumbnail downloads
-            if let AppEvent::ChannelsUpdated(ref channels) = event {
+            if let AppEvent::Daemon(crate::app::DaemonEvent::ChannelsUpdated(ref channels)) = event {
                 spawn_thumbnail_downloads(channels, app, &internal_tx);
             }
             if let Some(action) = app.handle_event(event) {
@@ -176,6 +176,7 @@ async fn handle_action(
             channel_name,
             platform,
             transcode,
+            from_start,
         } => {
             let cookies_path = match platform {
                 crate::platform::PlatformKind::YouTube => app
@@ -202,8 +203,14 @@ async fn handle_action(
                 transcode,
                 cookies_path,
                 stream_title,
+                from_start,
+                job_id: None,
             });
-            app.status_message = "Starting recording...".to_string();
+            app.status_message = if from_start {
+                "Starting recording from stream start...".to_string()
+            } else {
+                "Starting recording...".to_string()
+            };
         }
         AppAction::Watch {
             channel_name,
@@ -265,7 +272,7 @@ async fn handle_action(
                 let _ = notify_rust::Notification::new()
                     .summary(&title)
                     .body(&body)
-                    .appname("StreaVo")
+                    .appname("StriVo")
                     .timeout(notify_rust::Timeout::Milliseconds(5000))
                     .show();
             });

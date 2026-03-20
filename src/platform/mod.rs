@@ -1,3 +1,4 @@
+pub mod patreon;
 pub mod twitch;
 pub mod youtube;
 
@@ -8,6 +9,7 @@ use serde::{Deserialize, Serialize};
 pub enum PlatformKind {
     Twitch,
     YouTube,
+    Patreon,
 }
 
 impl std::fmt::Display for PlatformKind {
@@ -15,11 +17,12 @@ impl std::fmt::Display for PlatformKind {
         match self {
             PlatformKind::Twitch => write!(f, "Twitch"),
             PlatformKind::YouTube => write!(f, "YouTube"),
+            PlatformKind::Patreon => write!(f, "Patreon"),
         }
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelEntry {
     pub id: String,
     pub platform: PlatformKind,
@@ -38,8 +41,8 @@ pub struct ChannelEntry {
 #[async_trait::async_trait]
 pub trait Platform: Send + Sync {
     fn kind(&self) -> PlatformKind;
-    async fn authenticate(&mut self) -> anyhow::Result<()>;
+    async fn authenticate(&self) -> anyhow::Result<()>;
     async fn fetch_followed_channels(&self) -> anyhow::Result<Vec<ChannelEntry>>;
     async fn check_live_status(&self, channel_ids: &[String]) -> anyhow::Result<Vec<ChannelEntry>>;
-    async fn refresh_token(&mut self) -> anyhow::Result<()>;
+    async fn refresh_token(&self) -> anyhow::Result<()>;
 }

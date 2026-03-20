@@ -1,3 +1,5 @@
+pub mod patreon;
+
 use anyhow::Result;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -20,6 +22,10 @@ pub struct ChannelMonitor {
     prev_live: HashMap<String, bool>,
     /// Auto-record channels we've already triggered for (avoid duplicate starts)
     auto_recorded: HashMap<String, bool>,
+    /// Notified when a platform authenticates (triggers immediate first poll)
+    auth_notify: Arc<tokio::sync::Notify>,
+    /// Notified when a client requests an immediate re-poll
+    poll_notify: Arc<tokio::sync::Notify>,
 }
 
 impl ChannelMonitor {
@@ -38,24 +44,64 @@ impl ChannelMonitor {
             cancel,
             prev_live: HashMap::new(),
             auto_recorded: HashMap::new(),
+            auth_notify: Arc::new(tokio::sync::Notify::new()),
+            poll_notify: Arc::new(tokio::sync::Notify::new()),
         }
+    }
+
+    /// Set an external auth notify (shared with auth tasks)
+    pub fn set_auth_notify(&mut self, notify: Arc<tokio::sync::Notify>) {
+        self.auth_notify = notify;
+    }
+
+    /// Get a handle to trigger an immediate re-poll
+    pub fn poll_notify(&self) -> Arc<tokio::sync::Notify> {
+        self.poll_notify.clone()
     }
 
     pub async fn run(mut self) {
         let poll_interval =
             std::time::Duration::from_secs(self.config.poll_interval_secs.max(15));
-        let mut interval = tokio::time::interval(poll_interval);
 
-        // Initial delay to let auth complete
-        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        // Wait for first platform auth or timeout before initial poll
+        tokio::select! {
+            _ = self.auth_notify.notified() => {
+                tracing::info!("Platform authenticated, starting initial poll");
+            }
+            _ = tokio::time::sleep(std::time::Duration::from_secs(10)) => {
+                tracing::warn!("No platform authenticated in 10s, polling anyway");
+            }
+            _ = self.cancel.cancelled() => {
+                tracing::info!("Monitor shutting down before first poll");
+                return;
+            }
+        }
+
+        // Immediate first poll
+        if let Err(e) = self.poll_all().await {
+            tracing::error!("Initial poll error: {e}");
+            let _ = self.event_tx.send(AppEvent::error(format!("Poll error: {e}")));
+        }
+
+        let mut interval = tokio::time::interval(poll_interval);
+        // Consume the first tick (it fires immediately)
+        interval.tick().await;
 
         loop {
             tokio::select! {
                 _ = interval.tick() => {
                     if let Err(e) = self.poll_all().await {
                         tracing::error!("Monitor poll error: {e}");
-                        let _ = self.event_tx.send(AppEvent::Error(format!("Poll error: {e}")));
+                        let _ = self.event_tx.send(AppEvent::error(format!("Poll error: {e}")));
                     }
+                }
+                _ = self.poll_notify.notified() => {
+                    tracing::info!("On-demand re-poll triggered");
+                    if let Err(e) = self.poll_all().await {
+                        tracing::error!("Monitor poll error: {e}");
+                        let _ = self.event_tx.send(AppEvent::error(format!("Poll error: {e}")));
+                    }
+                    interval.reset();
                 }
                 _ = self.cancel.cancelled() => {
                     tracing::info!("Monitor shutting down");
@@ -121,7 +167,7 @@ impl ChannelMonitor {
                     for ch in &channels {
                         let was_live = self.prev_live.get(&ch.id).copied().unwrap_or(false);
                         if ch.is_live && !was_live {
-                            let _ = self.event_tx.send(AppEvent::ChannelWentLive(ch.clone()));
+                            let _ = self.event_tx.send(AppEvent::channel_went_live(ch.clone()));
 
                             // Auto-record trigger: use ch.auto_record from fresh data
                             if ch.auto_record && !self.auto_recorded.get(&ch.id).copied().unwrap_or(false) {
@@ -134,10 +180,12 @@ impl ChannelMonitor {
                                     transcode: self.config.recording.transcode,
                                     cookies_path,
                                     stream_title: ch.stream_title.clone(),
+                                    from_start: false,
+                                    job_id: None,
                                 });
                             }
                         } else if !ch.is_live && was_live {
-                            let _ = self.event_tx.send(AppEvent::ChannelWentOffline(ch.clone()));
+                            let _ = self.event_tx.send(AppEvent::channel_went_offline(ch.clone()));
                             self.auto_recorded.remove(&ch.id);
                         }
                         self.prev_live.insert(ch.id.clone(), ch.is_live);
@@ -160,7 +208,7 @@ impl ChannelMonitor {
                 .then(a.display_name.to_lowercase().cmp(&b.display_name.to_lowercase()))
         });
 
-        let _ = self.event_tx.send(AppEvent::ChannelsUpdated(all_channels));
+        let _ = self.event_tx.send(AppEvent::channels_updated(all_channels));
 
         Ok(())
     }
@@ -173,7 +221,7 @@ impl ChannelMonitor {
                 .youtube
                 .as_ref()
                 .and_then(|y| y.cookies_path.clone()),
-            _ => None,
+            PlatformKind::Twitch | PlatformKind::Patreon => None,
         }
     }
 }
