@@ -155,6 +155,11 @@ impl PluginRegistry {
     pub fn pane_for_command(&self, key: &KeyEvent) -> Option<PaneId> {
         self.command_map.get(&(key.code, key.modifiers)).copied()
     }
+
+    /// Look up a plugin by name for downcasting via `as_any()`.
+    pub fn plugin_ref(&self, name: &str) -> Option<&dyn Plugin> {
+        self.plugins.iter().find(|p| p.name() == name).map(|p| p.as_ref())
+    }
 }
 
 #[cfg(test)]

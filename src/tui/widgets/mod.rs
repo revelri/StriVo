@@ -6,3 +6,5 @@ pub mod wizard;
 pub mod dialog;
 pub mod settings;
 pub mod log_viewer;
+pub mod platform_debug;
+pub mod properties;

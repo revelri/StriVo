@@ -5,7 +5,7 @@ use ratatui::{
 
 use crate::app::{ActivePane, AppState};
 use crate::plugin::registry::PluginRegistry;
-use crate::tui::widgets::{channel_detail, dialog, log_viewer, recording_list, settings, sidebar, status_bar, wizard};
+use crate::tui::widgets::{channel_detail, dialog, log_viewer, platform_debug, properties, recording_list, settings, sidebar, status_bar, wizard};
 
 pub fn render(frame: &mut Frame, app: &mut AppState, registry: &PluginRegistry) {
     let [main_area, status_area] = Layout::vertical([
@@ -55,5 +55,13 @@ pub fn render(frame: &mut Frame, app: &mut AppState, registry: &PluginRegistry) 
 
     if app.quit_confirm {
         dialog::render_confirm(frame, frame.area(), "Quit with active recordings?");
+    }
+
+    if let Some(kind) = app.show_platform_debug {
+        platform_debug::render(frame, frame.area(), app, kind);
+    }
+
+    if app.show_properties.is_some() {
+        properties::render(frame, frame.area(), app, registry);
     }
 }
