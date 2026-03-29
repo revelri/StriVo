@@ -39,6 +39,9 @@ pub struct RecordingJob {
     pub error: Option<String>,
     pub stream_title: Option<String>,
     pub watched: bool,
+    /// Optional playlist/group this recording belongs to.
+    #[serde(default)]
+    pub playlist: Option<String>,
 }
 
 impl RecordingJob {
@@ -64,6 +67,7 @@ impl RecordingJob {
             error: None,
             stream_title,
             watched: false,
+            playlist: None,
         }
     }
 
@@ -90,6 +94,7 @@ impl RecordingJob {
             error: None,
             stream_title,
             watched: false,
+            playlist: None,
         }
     }
 
