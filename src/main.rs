@@ -3,6 +3,7 @@ mod cli;
 mod config;
 mod daemon;
 mod ipc;
+mod media;
 mod monitor;
 mod platform;
 mod playback;
