@@ -12,16 +12,27 @@ use ratatui::layout::Rect;
 use ratatui::Frame;
 use uuid::Uuid;
 
+use std::collections::HashSet;
+
 use crate::app::{AppState, DaemonEvent};
 use crate::config::ArchiverConfig;
 use crate::platform::ChannelEntry;
+use crate::recording::job::RecordingState;
 
 use super::{
     DaemonEventKind, PaneId, Plugin, PluginAction, PluginCommand, PluginContext,
 };
-use types::{ArchiveJob, ArchiveState, ArchiverEvent, ArchiverView};
+use types::{
+    ArchiveJob, ArchiveState, ArchiverEvent, ArchiverView, ConfigModalState,
+    PickerState, RecordingFilter,
+};
 
 pub const PANE_ID: PaneId = "archiver";
+
+/// Number of static config fields in the Archiver config modal (before channel checklist).
+/// Fields: enabled, archive_dir, format, concurrent_fragments, rate_limit = 5 fields.
+/// Channel checkboxes start at index ARCHIVER_STATIC_FIELDS (i.e., after index 4).
+const ARCHIVER_STATIC_FIELDS: usize = 5;
 
 pub struct ArchiverPlugin {
     db: Option<rusqlite::Connection>,
@@ -33,6 +44,24 @@ pub struct ArchiverPlugin {
     pub selected_job: usize,
     pub view: ArchiverView,
     pub last_error: Option<String>,
+
+    // --- New: config modal, picker, tandem ---
+    /// Whether the plugin is enabled for tandem auto-processing.
+    pub enabled: bool,
+    /// Whether the first-run config has been completed.
+    pub configured: bool,
+    /// Tandem channels.
+    pub tandem_channels: Vec<String>,
+    /// Tandem playlists.
+    pub tandem_playlists: Vec<String>,
+    /// Config modal state.
+    pub config_modal: ConfigModalState,
+    /// Draft config being edited in the modal.
+    pub config_draft: Option<ArchiverConfig>,
+    /// Recording picker state.
+    pub picker: PickerState,
+    /// Cached channel list for config modal tandem checkboxes.
+    pub cached_channels: Vec<(String, String)>,
 }
 
 impl ArchiverPlugin {
@@ -47,6 +76,14 @@ impl ArchiverPlugin {
             selected_job: 0,
             view: ArchiverView::ChannelList,
             last_error: None,
+            enabled: false,
+            configured: false,
+            tandem_channels: Vec::new(),
+            tandem_playlists: Vec::new(),
+            config_modal: ConfigModalState::Hidden,
+            config_draft: None,
+            picker: PickerState::default(),
+            cached_channels: Vec::new(),
         }
     }
 
@@ -178,6 +215,259 @@ impl ArchiverPlugin {
         }]
     }
 
+    /// Open the config modal, cloning current config into draft.
+    fn open_config_modal(&mut self, app: &AppState) {
+        self.cached_channels = app.channels.iter().map(|ch| {
+            let key = format!("{}:{}", ch.platform, ch.id);
+            let display = format!("[{}] {}", ch.platform, ch.display_name);
+            (key, display)
+        }).collect();
+
+        let draft = self.config.clone().unwrap_or_default();
+        self.config_draft = Some(draft);
+
+        self.config_modal = ConfigModalState::Active {
+            selected_field: 0,
+            editing: false,
+            static_field_count: ARCHIVER_STATIC_FIELDS,
+        };
+    }
+
+    /// Handle keys while config modal is active.
+    fn handle_config_modal_key(&mut self, key: KeyEvent, _app: &AppState) -> Vec<PluginAction> {
+        let ConfigModalState::Active { ref mut selected_field, ref mut editing, static_field_count } = self.config_modal else {
+            return Vec::new();
+        };
+        let total_fields = static_field_count + self.cached_channels.len();
+        let save_idx = total_fields;
+
+        // Indices: 0=enabled, 1=archive_dir, 2=format, 3=concurrent_fragments, 4..4+N=tandem channels, last=[Save]
+        // Actually: 0=enabled, 1=archive_dir, 2=format, 3=concurrent_fragments, 4=rate_limit, then channels, then save
+        // static_field_count = 5 means indices 0..4 are static fields
+
+        if *editing {
+            match key.code {
+                KeyCode::Esc | KeyCode::Enter => { *editing = false; }
+                KeyCode::Backspace => {
+                    if let Some(ref mut draft) = self.config_draft {
+                        match *selected_field {
+                            1 => { let s = draft.archive_dir.to_string_lossy().to_string(); if !s.is_empty() { draft.archive_dir = PathBuf::from(&s[..s.len().saturating_sub(1)]); } }
+                            2 => { draft.format.pop(); }
+                            3 => { /* number field - no backspace */ }
+                            4 => { draft.rate_limit.pop(); }
+                            _ => {}
+                        }
+                    }
+                }
+                KeyCode::Char(c) => {
+                    if let Some(ref mut draft) = self.config_draft {
+                        match *selected_field {
+                            1 => { let mut s = draft.archive_dir.to_string_lossy().to_string(); s.push(c); draft.archive_dir = PathBuf::from(s); }
+                            2 => draft.format.push(c),
+                            3 => {
+                                if let Some(d) = c.to_digit(10) {
+                                    draft.concurrent_fragments = draft.concurrent_fragments * 10 + d;
+                                }
+                            }
+                            4 => draft.rate_limit.push(c),
+                            _ => {}
+                        }
+                    }
+                }
+                _ => {}
+            }
+            return Vec::new();
+        }
+
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                *selected_field = (*selected_field + 1).min(save_idx);
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                *selected_field = selected_field.saturating_sub(1);
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                if *selected_field == save_idx {
+                    // Save
+                    if let Some(mut draft) = self.config_draft.take() {
+                        draft.configured = true;
+                        self.enabled = draft.enabled;
+                        self.configured = true;
+                        self.tandem_channels = draft.tandem_channels.clone();
+                        self.tandem_playlists = draft.tandem_playlists.clone();
+                        self.config = Some(draft.clone());
+                        self.config_modal = ConfigModalState::Hidden;
+                        return vec![PluginAction::UpdateConfig {
+                            plugin_name: "archiver",
+                            config_update: Box::new(draft),
+                        }];
+                    }
+                    self.config_modal = ConfigModalState::Hidden;
+                } else if *selected_field == 0 {
+                    // Toggle enabled
+                    if let Some(ref mut draft) = self.config_draft {
+                        draft.enabled = !draft.enabled;
+                    }
+                } else if *selected_field >= ARCHIVER_STATIC_FIELDS && *selected_field < save_idx {
+                    // Tandem channel toggle
+                    let ch_idx = *selected_field - ARCHIVER_STATIC_FIELDS;
+                    if let Some(ref mut draft) = self.config_draft {
+                        if let Some((key, _)) = self.cached_channels.get(ch_idx) {
+                            if draft.tandem_channels.contains(key) {
+                                draft.tandem_channels.retain(|k| k != key);
+                            } else {
+                                draft.tandem_channels.push(key.clone());
+                                draft.enabled = true;
+                            }
+                        }
+                    }
+                } else if matches!(*selected_field, 1 | 2 | 3 | 4) {
+                    *editing = true;
+                    // Reset concurrent_fragments for re-entry when editing
+                    if *selected_field == 3 {
+                        if let Some(ref mut draft) = self.config_draft {
+                            draft.concurrent_fragments = 0;
+                        }
+                    }
+                }
+            }
+            KeyCode::Esc => {
+                self.config_modal = ConfigModalState::Hidden;
+                self.config_draft = None;
+            }
+            _ => {}
+        }
+        Vec::new()
+    }
+
+    /// Handle keys in the RecordingPicker view.
+    fn handle_picker_key(&mut self, key: KeyEvent, app: &AppState) -> Vec<PluginAction> {
+        self.refresh_picker_list(app);
+
+        match key.code {
+            KeyCode::Tab => { self.view = ArchiverView::ChannelList; }
+            KeyCode::Char('j') | KeyCode::Down => {
+                if !self.picker.visible_ids.is_empty() {
+                    self.picker.selected = (self.picker.selected + 1) % self.picker.visible_ids.len();
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                if !self.picker.visible_ids.is_empty() {
+                    self.picker.selected = if self.picker.selected == 0 {
+                        self.picker.visible_ids.len() - 1
+                    } else {
+                        self.picker.selected - 1
+                    };
+                }
+            }
+            KeyCode::Char(' ') => {
+                if let Some(&id) = self.picker.visible_ids.get(self.picker.selected) {
+                    if !self.picker.selections.remove(&id) {
+                        self.picker.selections.insert(id);
+                    }
+                }
+            }
+            KeyCode::Char('a') => {
+                for &id in &self.picker.visible_ids {
+                    self.picker.selections.insert(id);
+                }
+            }
+            KeyCode::Char('f') => {
+                self.cycle_picker_filter(app);
+                self.refresh_picker_list(app);
+            }
+            KeyCode::Enter => {
+                return self.process_selected_recordings(app);
+            }
+            KeyCode::Esc => {
+                self.picker.selections.clear();
+                self.view = ArchiverView::ChannelList;
+            }
+            _ => {}
+        }
+        Vec::new()
+    }
+
+    fn refresh_picker_list(&mut self, app: &AppState) {
+        let finished: Vec<_> = app.recordings.values()
+            .filter(|r| r.state == RecordingState::Finished)
+            .filter(|r| match &self.picker.filter {
+                RecordingFilter::All => true,
+                RecordingFilter::ByChannel(ch) => {
+                    let key = format!("{}:{}", r.platform, r.channel_id);
+                    key == *ch
+                }
+                RecordingFilter::ByPlaylist(pl) => {
+                    r.playlist.as_deref() == Some(pl.as_str())
+                }
+            })
+            .collect();
+
+        self.picker.visible_ids = finished.iter().map(|r| r.id).collect();
+        if self.picker.selected >= self.picker.visible_ids.len() {
+            self.picker.selected = self.picker.visible_ids.len().saturating_sub(1);
+        }
+    }
+
+    fn cycle_picker_filter(&mut self, app: &AppState) {
+        let channels: Vec<String> = {
+            let mut seen = HashSet::new();
+            app.recordings.values()
+                .filter(|r| r.state == RecordingState::Finished)
+                .filter_map(|r| {
+                    let key = format!("{}:{}", r.platform, r.channel_id);
+                    if seen.insert(key.clone()) { Some(key) } else { None }
+                })
+                .collect()
+        };
+
+        self.picker.filter = match &self.picker.filter {
+            RecordingFilter::All => {
+                if let Some(ch) = channels.first() {
+                    RecordingFilter::ByChannel(ch.clone())
+                } else {
+                    RecordingFilter::All
+                }
+            }
+            RecordingFilter::ByChannel(current) => {
+                let idx = channels.iter().position(|c| c == current).unwrap_or(0);
+                if idx + 1 < channels.len() {
+                    RecordingFilter::ByChannel(channels[idx + 1].clone())
+                } else {
+                    RecordingFilter::All
+                }
+            }
+            RecordingFilter::ByPlaylist(_) => RecordingFilter::All,
+        };
+        self.picker.selections.clear();
+    }
+
+    fn process_selected_recordings(&mut self, app: &AppState) -> Vec<PluginAction> {
+        let ids: Vec<uuid::Uuid> = if self.picker.selections.is_empty() {
+            self.picker.visible_ids.get(self.picker.selected).copied().into_iter().collect()
+        } else {
+            self.picker.selections.drain().collect()
+        };
+
+        // Clone matching channels to avoid borrow conflict with self.start_archive()
+        let channel_matches: Vec<_> = ids.iter()
+            .filter_map(|id| app.recordings.get(id))
+            .filter_map(|rec| {
+                self.channels.iter().find(|c| c.id == rec.channel_id).cloned()
+            })
+            .collect();
+
+        let mut actions = Vec::new();
+        for channel in &channel_matches {
+            let mut batch = self.start_archive(channel);
+            actions.append(&mut batch);
+        }
+        if !actions.is_empty() {
+            self.view = ArchiverView::ArchiveQueue;
+        }
+        actions
+    }
+
     fn handle_archiver_event(&mut self, event: ArchiverEvent) -> Vec<PluginAction> {
         match event {
             ArchiverEvent::ScanComplete { job_id, videos } => {
@@ -274,12 +564,19 @@ impl Plugin for ArchiverPlugin {
 
         self.config = Some(ctx.config.archiver.clone());
 
+        // Load tandem / enabled state from config
+        self.enabled = ctx.config.archiver.enabled;
+        self.configured = ctx.config.archiver.configured;
+        self.tandem_channels = ctx.config.archiver.tandem_channels.clone();
+        self.tandem_playlists = ctx.config.archiver.tandem_playlists.clone();
+
         // Ensure archive directory exists
         if let Some(ref config) = self.config {
             let _ = std::fs::create_dir_all(&config.archive_dir);
         }
 
-        tracing::info!("Archiver plugin initialized (db: {})", db_path.display());
+        tracing::info!("Archiver plugin initialized (enabled: {}, configured: {}, tandem_channels: {}, db: {})",
+            self.enabled, self.configured, self.tandem_channels.len(), db_path.display());
         Ok(())
     }
 
@@ -291,23 +588,64 @@ impl Plugin for ArchiverPlugin {
     fn event_filter(&self) -> Option<Vec<DaemonEventKind>> {
         Some(vec![
             DaemonEventKind::ChannelsUpdated,
+            DaemonEventKind::RecordingFinished,
         ])
     }
 
-    fn on_event(&mut self, event: &DaemonEvent, _app: &AppState) -> Vec<PluginAction> {
-        if let DaemonEvent::ChannelsUpdated(channels) = event {
-            self.channels = channels.clone();
+    fn on_event(&mut self, event: &DaemonEvent, app: &AppState) -> Vec<PluginAction> {
+        match event {
+            DaemonEvent::ChannelsUpdated(channels) => {
+                self.channels = channels.clone();
+            }
+            DaemonEvent::RecordingFinished { job_id, final_state, .. } => {
+                if *final_state != RecordingState::Finished || !self.enabled {
+                    return Vec::new();
+                }
+                if let Some(rec) = app.recordings.get(job_id) {
+                    let channel_key = format!("{}:{}", rec.platform, rec.channel_id);
+                    let is_tandem = self.tandem_channels.contains(&channel_key)
+                        || rec.playlist.as_ref().is_some_and(|p| self.tandem_playlists.contains(p));
+
+                    if is_tandem {
+                        let channel = self.channels.iter().find(|c| c.id == rec.channel_id).cloned();
+                        if let Some(channel) = channel {
+                            return self.start_archive(&channel);
+                        }
+                    }
+                }
+            }
+            _ => {}
         }
         Vec::new()
     }
 
-    fn on_key(&mut self, key: KeyEvent, _app: &AppState) -> Vec<PluginAction> {
+    fn on_key(&mut self, key: KeyEvent, app: &AppState) -> Vec<PluginAction> {
+        // First-run: auto-open config modal if not configured
+        if !self.configured && self.config_modal == ConfigModalState::Hidden {
+            self.open_config_modal(app);
+        }
+
+        // Config modal intercepts all keys when active
+        if self.config_modal != ConfigModalState::Hidden {
+            return self.handle_config_modal_key(key, app);
+        }
+
+        // RecordingPicker view
+        if self.view == ArchiverView::RecordingPicker {
+            return self.handle_picker_key(key, app);
+        }
+
+        // Channel list / queue views
         match key.code {
             KeyCode::Tab => {
                 self.view = match self.view {
                     ArchiverView::ChannelList => ArchiverView::ArchiveQueue,
-                    ArchiverView::ArchiveQueue => ArchiverView::ChannelList,
+                    ArchiverView::ArchiveQueue => ArchiverView::RecordingPicker,
+                    ArchiverView::RecordingPicker => ArchiverView::ChannelList,
                 };
+            }
+            KeyCode::Char('c') => {
+                self.open_config_modal(app);
             }
             KeyCode::Char('j') | KeyCode::Down => {
                 match self.view {
@@ -321,6 +659,7 @@ impl Plugin for ArchiverPlugin {
                             self.selected_job = (self.selected_job + 1) % self.jobs.len();
                         }
                     }
+                    _ => {}
                 }
             }
             KeyCode::Char('k') | KeyCode::Up => {
@@ -343,6 +682,7 @@ impl Plugin for ArchiverPlugin {
                             };
                         }
                     }
+                    _ => {}
                 }
             }
             KeyCode::Enter => {
@@ -353,7 +693,6 @@ impl Plugin for ArchiverPlugin {
                 }
             }
             KeyCode::Char('d') => {
-                // Cancel selected job
                 if self.view == ArchiverView::ArchiveQueue {
                     if let Some(job) = self.jobs.get_mut(self.selected_job) {
                         if job.state == ArchiveState::Downloading || job.state == ArchiveState::Scanning {
@@ -398,7 +737,15 @@ impl Plugin for ArchiverPlugin {
         area: Rect,
         app: &AppState,
     ) {
-        render::render(self, frame, area, app);
+        match self.view {
+            ArchiverView::RecordingPicker => render::render_recording_picker(self, frame, area, app),
+            _ => render::render(self, frame, area, app),
+        }
+
+        // Overlay config modal if active
+        if self.config_modal != ConfigModalState::Hidden {
+            render::render_config_modal(self, frame, area);
+        }
     }
 
     fn status_line(&self, _app: &AppState) -> Option<String> {

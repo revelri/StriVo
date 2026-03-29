@@ -1,6 +1,52 @@
+use std::collections::HashSet;
 use std::path::PathBuf;
 use uuid::Uuid;
 use crate::platform::PlatformKind;
+
+/// Config modal state for the Archiver plugin.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigModalState {
+    /// Modal is not showing.
+    Hidden,
+    /// Modal is active (first-run or re-opened via 'c').
+    Active {
+        /// Which form field is currently selected.
+        selected_field: usize,
+        /// Whether the selected field is in text-edit mode.
+        editing: bool,
+        /// Total number of static fields (before channel checklist).
+        static_field_count: usize,
+    },
+}
+
+/// Filter for the recording picker list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecordingFilter {
+    All,
+    ByChannel(String),
+    ByPlaylist(String),
+}
+
+/// State for the recording picker view.
+#[derive(Debug, Clone)]
+pub struct PickerState {
+    pub selected: usize,
+    pub selections: HashSet<Uuid>,
+    pub filter: RecordingFilter,
+    /// Cached sorted list of recording IDs matching current filter.
+    pub visible_ids: Vec<Uuid>,
+}
+
+impl Default for PickerState {
+    fn default() -> Self {
+        Self {
+            selected: 0,
+            selections: HashSet::new(),
+            filter: RecordingFilter::All,
+            visible_ids: Vec::new(),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
@@ -57,6 +103,7 @@ pub struct VideoEntry {
 pub enum ArchiverView {
     ChannelList,
     ArchiveQueue,
+    RecordingPicker,
 }
 
 /// Events from async archive tasks.
