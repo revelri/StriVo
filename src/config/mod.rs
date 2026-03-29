@@ -41,6 +41,14 @@ pub struct AppConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CrunchrConfig {
+    /// Whether the plugin is enabled (gates tandem auto-processing).
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Whether the first-run config modal has been completed.
+    #[serde(default)]
+    pub configured: bool,
+
     #[serde(default = "default_crunchr_backend")]
     pub backend: String,
 
@@ -63,17 +71,30 @@ pub struct CrunchrConfig {
 
     #[serde(default)]
     pub analysis: CrunchrAnalysisConfig,
+
+    /// Tandem mode: auto-trigger on RecordingFinished for these channels.
+    /// Each entry is "Platform:channel_id" (e.g., "Twitch:123456").
+    #[serde(default)]
+    pub tandem_channels: Vec<String>,
+
+    /// Tandem mode: auto-trigger for recordings from these playlists.
+    #[serde(default)]
+    pub tandem_playlists: Vec<String>,
 }
 
 impl Default for CrunchrConfig {
     fn default() -> Self {
         Self {
+            enabled: false,
+            configured: false,
             backend: default_crunchr_backend(),
             api_key_env: None,
             endpoint: None,
             whisper_model: None,
             whisper_timeout_secs: default_whisper_timeout(),
             analysis: CrunchrAnalysisConfig::default(),
+            tandem_channels: Vec::new(),
+            tandem_playlists: Vec::new(),
         }
     }
 }
@@ -116,6 +137,14 @@ fn default_analysis_model() -> String {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArchiverConfig {
+    /// Whether the plugin is enabled (gates tandem auto-processing).
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Whether the first-run config modal has been completed.
+    #[serde(default)]
+    pub configured: bool,
+
     #[serde(default = "default_archive_dir")]
     pub archive_dir: PathBuf,
     #[serde(default = "default_archive_format")]
@@ -124,18 +153,28 @@ pub struct ArchiverConfig {
     pub concurrent_fragments: u32,
     #[serde(default)]
     pub rate_limit: String,
+
+    /// Tandem mode: auto-trigger archiving for these channels.
+    /// Each entry is "Platform:channel_id" (e.g., "Twitch:123456").
     #[serde(default)]
-    pub auto_archive: bool,
+    pub tandem_channels: Vec<String>,
+
+    /// Tandem mode: auto-trigger archiving for recordings from these playlists.
+    #[serde(default)]
+    pub tandem_playlists: Vec<String>,
 }
 
 impl Default for ArchiverConfig {
     fn default() -> Self {
         Self {
+            enabled: false,
+            configured: false,
             archive_dir: default_archive_dir(),
             format: default_archive_format(),
             concurrent_fragments: default_concurrent_fragments(),
             rate_limit: String::new(),
-            auto_archive: false,
+            tandem_channels: Vec::new(),
+            tandem_playlists: Vec::new(),
         }
     }
 }

@@ -45,6 +45,11 @@ pub enum PluginAction {
     },
     /// Play a file in mpv.
     PlayFile(PathBuf),
+    /// Request the host to update a plugin's config section and persist to disk.
+    UpdateConfig {
+        plugin_name: &'static str,
+        config_update: Box<dyn Any + Send>,
+    },
 }
 
 /// Context provided to plugins during initialization.
