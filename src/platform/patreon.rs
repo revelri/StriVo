@@ -27,6 +27,8 @@ pub struct PatreonCreator {
     pub name: String,
     pub vanity: Option<String>,
     pub url: String,
+    /// Subscription tier name (e.g., "Tier 1", "Premium", etc.), if pledged.
+    pub tier: Option<String>,
 }
 
 #[allow(dead_code)]
@@ -232,16 +234,68 @@ impl PatreonClient {
         }
     }
 
-    /// Fetch campaigns the user supports (pledged creators).
+    /// Fetch campaigns the user supports (pledged creators), including tier info.
     pub async fn fetch_pledged_creators(&self) -> Result<Vec<PatreonCreator>> {
         let url = format!(
-            "{PATREON_API_URL}/identity?include=memberships.campaign&fields%5Bcampaign%5D=vanity,url,creation_name"
+            "{PATREON_API_URL}/identity?include=memberships.campaign,memberships.currently_entitled_tiers\
+             &fields%5Bcampaign%5D=vanity,url,creation_name\
+             &fields%5Btier%5D=title\
+             &fields%5Bmember%5D=patron_status"
         );
         let data = self.api_get(&url).await?;
 
+        let included = data.get("included").and_then(|v| v.as_array());
+
+        // Build tier title lookup: tier_id -> title
+        let mut tier_titles: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        if let Some(items) = included {
+            for item in items {
+                if item.get("type").and_then(|t| t.as_str()) == Some("tier") {
+                    let id = item.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                    let title = item.get("attributes")
+                        .and_then(|a| a.get("title"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("Unknown Tier");
+                    if !id.is_empty() {
+                        tier_titles.insert(id.to_string(), title.to_string());
+                    }
+                }
+            }
+        }
+
+        // Build membership -> (campaign_id, tier_name) mapping
+        // Each "member" item has relationships.campaign.data.id and relationships.currently_entitled_tiers.data[].id
+        let mut campaign_tier: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        if let Some(items) = included {
+            for item in items {
+                if item.get("type").and_then(|t| t.as_str()) == Some("member") {
+                    let campaign_id = item.get("relationships")
+                        .and_then(|r| r.get("campaign"))
+                        .and_then(|c| c.get("data"))
+                        .and_then(|d| d.get("id"))
+                        .and_then(|v| v.as_str());
+
+                    let tier_id = item.get("relationships")
+                        .and_then(|r| r.get("currently_entitled_tiers"))
+                        .and_then(|t| t.get("data"))
+                        .and_then(|d| d.as_array())
+                        .and_then(|arr| arr.first())
+                        .and_then(|t| t.get("id"))
+                        .and_then(|v| v.as_str());
+
+                    if let (Some(cid), Some(tid)) = (campaign_id, tier_id) {
+                        if let Some(title) = tier_titles.get(tid) {
+                            campaign_tier.insert(cid.to_string(), title.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        // Build creator list from campaign items
         let mut creators = Vec::new();
-        if let Some(included) = data.get("included").and_then(|v| v.as_array()) {
-            for item in included {
+        if let Some(items) = included {
+            for item in items {
                 if item.get("type").and_then(|t| t.as_str()) == Some("campaign") {
                     let id = item.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
                     let attrs = item.get("attributes");
@@ -261,11 +315,13 @@ impl PatreonClient {
                         .to_string();
 
                     if !id.is_empty() {
+                        let tier = campaign_tier.get(&id).cloned();
                         creators.push(PatreonCreator {
                             campaign_id: id,
                             name,
                             vanity,
                             url,
+                            tier,
                         });
                     }
                 }
