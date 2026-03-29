@@ -21,10 +21,16 @@ async fn resolve_twitch(channel_name: &str) -> Result<StreamInfo> {
     let url = format!("https://twitch.tv/{channel_name}");
 
     // Try streamlink first
-    let output = Command::new("streamlink")
-        .args(["--stream-url", "--twitch-disable-ads", &url, "best"])
-        .output()
-        .await;
+    let mut cmd = Command::new("streamlink");
+    cmd.args(["--stream-url", "--twitch-disable-ads"]);
+
+    // Pass OAuth token for sub-only streams and premium features
+    if let Ok(Some(token)) = crate::config::credentials::get_secret("twitch_access_token") {
+        cmd.arg(format!("--twitch-api-header=Authorization=OAuth {token}"));
+    }
+
+    cmd.args([&url, "best"]);
+    let output = cmd.output().await;
 
     match output {
         Ok(output) if output.status.success() => {
