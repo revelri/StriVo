@@ -258,6 +258,27 @@ fn handle_plugin_action(
         crate::plugin::PluginAction::PlayFile(_path) => {
             // PlayFile from plugin actions is handled via process_plugin_actions -> AppAction
         }
+        crate::plugin::PluginAction::UpdateConfig { plugin_name, config_update } => {
+            match plugin_name {
+                "crunchr" => {
+                    if let Ok(cfg) = config_update.downcast::<crate::config::CrunchrConfig>() {
+                        app.config.crunchr = *cfg;
+                    }
+                }
+                "archiver" => {
+                    if let Ok(cfg) = config_update.downcast::<crate::config::ArchiverConfig>() {
+                        app.config.archiver = *cfg;
+                    }
+                }
+                _ => {
+                    tracing::warn!("Unknown plugin config update: {plugin_name}");
+                }
+            }
+            if let Err(e) = app.config.save(None) {
+                tracing::error!("Failed to save config after plugin update: {e}");
+                app.status_message = format!("Config save failed: {e}");
+            }
+        }
     }
 }
 
@@ -379,6 +400,19 @@ async fn handle_action(
                     plugin_name,
                     event: result,
                 });
+            });
+        }
+        AppAction::ProbeMedia { job_id, path } => {
+            let tx = watch_tx.clone();
+            tokio::spawn(async move {
+                match crate::media::probe_file(&path).await {
+                    Ok(info) => {
+                        let _ = tx.send(AppEvent::MediaProbed { job_id, info });
+                    }
+                    Err(e) => {
+                        tracing::warn!("ffprobe failed for {}: {e}", path.display());
+                    }
+                }
             });
         }
     }

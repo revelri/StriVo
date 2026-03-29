@@ -45,9 +45,11 @@ pub fn render_help(frame: &mut Frame, area: Rect, registry: &PluginRegistry) {
         ("w", "Watch in mpv"),
         ("a", "Toggle monitor"),
         ("t", "Toggle transcode mode"),
+        ("i", "Recording info (in list)"),
         ("s", "Settings"),
         ("L", "Recording list"),
         ("F", "Log viewer"),
+        ("Ctrl+D", "Platform diagnostics"),
         ("q", "Quit"),
         ("?", "Toggle this help"),
     ];

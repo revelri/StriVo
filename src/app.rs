@@ -89,6 +89,11 @@ pub enum AppEvent {
         plugin_name: &'static str,
         event: Box<dyn std::any::Any + Send>,
     },
+    /// ffprobe result for a recording
+    MediaProbed {
+        job_id: Uuid,
+        info: crate::media::MediaInfo,
+    },
 }
 
 // Convenience constructors so existing code that sends DaemonEvent variants
@@ -141,6 +146,7 @@ pub enum ActivePane {
     Log,
     Wizard,
     Plugin(PaneId),
+    StatusBar,
 }
 
 pub struct AppState {
@@ -204,6 +210,21 @@ pub struct AppState {
     /// Filtered recording job IDs. Empty = no filter active.
     pub search_filtered_recordings: Vec<uuid::Uuid>,
 
+    // Platform diagnostics
+    /// Per-platform error ring buffer (last 10 errors each).
+    pub platform_errors: HashMap<PlatformKind, Vec<String>>,
+    /// Which platform debug overlay to show, if any.
+    pub show_platform_debug: Option<PlatformKind>,
+    /// Selected indicator index in StatusBar focus mode (among configured platforms).
+    pub selected_indicator: usize,
+    /// Pane to return to when leaving StatusBar focus.
+    pub prev_pane: Option<ActivePane>,
+
+    // Recording properties modal
+    /// Which recording's properties modal is open.
+    pub show_properties: Option<Uuid>,
+    /// Cached media info from ffprobe.
+    pub media_info_cache: HashMap<Uuid, crate::media::MediaInfo>,
 }
 
 impl AppState {
@@ -257,6 +278,12 @@ impl AppState {
             search_query: String::new(),
             search_filtered_channels: Vec::new(),
             search_filtered_recordings: Vec::new(),
+            platform_errors: HashMap::new(),
+            show_platform_debug: None,
+            selected_indicator: 0,
+            prev_pane: None,
+            show_properties: None,
+            media_info_cache: HashMap::new(),
         }
     }
 
@@ -375,6 +402,9 @@ impl AppState {
             AppEvent::Daemon(de) => return self.handle_daemon_event(de),
             // PluginEvent is handled by the caller (tui::run_loop) which owns the registry
             AppEvent::PluginEvent { .. } => {}
+            AppEvent::MediaProbed { job_id, info } => {
+                self.media_info_cache.insert(job_id, info);
+            }
         }
         None
     }
@@ -479,8 +509,26 @@ impl AppState {
             DaemonEvent::PatreonPostFound { creator_name, post_title } => {
                 self.status_message = format!("Patreon: {creator_name} posted '{post_title}'");
             }
-            DaemonEvent::Error(msg) => {
+            DaemonEvent::Error(ref msg) => {
                 self.status_message = format!("Error: {msg}");
+                // Categorize error by platform keywords for the diagnostics view
+                let msg_lower = msg.to_lowercase();
+                let kind = if msg_lower.contains("twitch") || msg_lower.contains("streamlink") {
+                    Some(PlatformKind::Twitch)
+                } else if msg_lower.contains("youtube") || msg_lower.contains("yt-dlp") || msg_lower.contains("ytdlp") {
+                    Some(PlatformKind::YouTube)
+                } else if msg_lower.contains("patreon") {
+                    Some(PlatformKind::Patreon)
+                } else {
+                    None
+                };
+                if let Some(kind) = kind {
+                    let errors = self.platform_errors.entry(kind).or_default();
+                    errors.push(msg.clone());
+                    if errors.len() > 10 {
+                        errors.remove(0);
+                    }
+                }
             }
         }
         None
@@ -538,8 +586,32 @@ impl AppState {
             }
         }
 
+        // Modal overlay dismiss (before global/pane keys)
+        if self.show_platform_debug.is_some() {
+            if matches!(key.code, KeyCode::Esc | KeyCode::Enter) {
+                self.show_platform_debug = None;
+            }
+            return None;
+        }
+
+        if self.show_properties.is_some() {
+            if matches!(key.code, KeyCode::Esc | KeyCode::Char('i')) {
+                self.show_properties = None;
+            }
+            return None;
+        }
+
         // Global keys
         match key.code {
+            // Ctrl+D: enter StatusBar diagnostic focus
+            KeyCode::Char('d') if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) => {
+                if self.active_pane != ActivePane::StatusBar {
+                    self.prev_pane = Some(self.active_pane.clone());
+                    self.active_pane = ActivePane::StatusBar;
+                    self.selected_indicator = 0;
+                }
+                return None;
+            }
             KeyCode::Char('q') if self.active_pane != ActivePane::Wizard => {
                 if self.active_recording_count() > 0 {
                     self.quit_confirm = true;
@@ -588,6 +660,7 @@ impl AppState {
             ActivePane::Wizard => None,
             // Plugin key events handled by caller which owns the registry
             ActivePane::Plugin(_) => None,
+            ActivePane::StatusBar => self.handle_status_bar_key(key),
         }
     }
 
@@ -811,6 +884,55 @@ impl AppState {
                         return Some(AppAction::PlayFile { path });
                     }
                 }
+            }
+            KeyCode::Char('i') => {
+                // Show recording properties modal
+                let recs = self.sorted_recordings();
+                if let Some(rec) = recs.get(self.selected_recording) {
+                    let job_id = rec.id;
+                    let path = rec.output_path.clone();
+                    self.show_properties = Some(job_id);
+                    if !self.media_info_cache.contains_key(&job_id) {
+                        return Some(AppAction::ProbeMedia { job_id, path });
+                    }
+                }
+            }
+            _ => {}
+        }
+        None
+    }
+
+    fn handle_status_bar_key(
+        &mut self,
+        key: crossterm::event::KeyEvent,
+    ) -> Option<AppAction> {
+        use crossterm::event::KeyCode;
+        use crate::tui::widgets::status_bar::configured_platforms;
+
+        let platforms = configured_platforms(self);
+        if platforms.is_empty() {
+            self.active_pane = self.prev_pane.take().unwrap_or(ActivePane::Sidebar);
+            return None;
+        }
+
+        match key.code {
+            KeyCode::Char('l') | KeyCode::Right => {
+                self.selected_indicator = (self.selected_indicator + 1) % platforms.len();
+            }
+            KeyCode::Char('h') | KeyCode::Left => {
+                self.selected_indicator = if self.selected_indicator == 0 {
+                    platforms.len() - 1
+                } else {
+                    self.selected_indicator - 1
+                };
+            }
+            KeyCode::Enter => {
+                if let Some(&kind) = platforms.get(self.selected_indicator) {
+                    self.show_platform_debug = Some(kind);
+                }
+            }
+            KeyCode::Esc => {
+                self.active_pane = self.prev_pane.take().unwrap_or(ActivePane::Sidebar);
             }
             _ => {}
         }
@@ -1119,6 +1241,10 @@ pub enum AppAction {
         plugin_name: &'static str,
         future: std::pin::Pin<Box<dyn std::future::Future<Output = Box<dyn std::any::Any + Send>> + Send>>,
     },
+    ProbeMedia {
+        job_id: Uuid,
+        path: PathBuf,
+    },
 }
 
 /// Process plugin actions, applying state mutations to app and registry.
@@ -1150,6 +1276,27 @@ pub fn process_plugin_actions(
             }
             crate::plugin::PluginAction::PlayFile(path) => {
                 result = Some(AppAction::PlayFile { path });
+            }
+            crate::plugin::PluginAction::UpdateConfig { plugin_name, config_update } => {
+                match plugin_name {
+                    "crunchr" => {
+                        if let Ok(cfg) = config_update.downcast::<crate::config::CrunchrConfig>() {
+                            app.config.crunchr = *cfg;
+                        }
+                    }
+                    "archiver" => {
+                        if let Ok(cfg) = config_update.downcast::<crate::config::ArchiverConfig>() {
+                            app.config.archiver = *cfg;
+                        }
+                    }
+                    _ => {
+                        tracing::warn!("Unknown plugin config update: {plugin_name}");
+                    }
+                }
+                if let Err(e) = app.config.save(None) {
+                    tracing::error!("Failed to save config after plugin update: {e}");
+                    app.status_message = format!("Config save failed: {e}");
+                }
             }
         }
     }
