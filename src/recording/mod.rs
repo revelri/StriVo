@@ -405,5 +405,33 @@ pub fn build_output_path(
         .replace("{title}", &safe_title)
         .replace("{platform}", platform_str);
 
-    config.recording_dir.join(filename)
+    disambiguate_path(config.recording_dir.join(filename))
+}
+
+/// If `path` already exists, return `stem_1.ext`, `stem_2.ext`, ... until a
+/// free slot is found. Guards against two concurrent recordings that resolve
+/// to the same template-rendered filename silently stomping each other.
+fn disambiguate_path(path: PathBuf) -> PathBuf {
+    if !path.exists() {
+        return path;
+    }
+    let parent = path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let ext = path
+        .extension()
+        .map(|s| s.to_string_lossy().into_owned());
+    for n in 1u32.. {
+        let candidate_name = match &ext {
+            Some(e) => format!("{stem}_{n}.{e}"),
+            None => format!("{stem}_{n}"),
+        };
+        let candidate = parent.join(candidate_name);
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    unreachable!()
 }
