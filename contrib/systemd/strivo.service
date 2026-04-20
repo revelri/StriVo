@@ -1,0 +1,13 @@
+[Unit]
+Description=StriVo Live Stream PVR Daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/strivo daemon
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

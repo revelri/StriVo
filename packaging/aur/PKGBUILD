@@ -1,0 +1,66 @@
+# Maintainer: revelri <slrevoy@mailbox.org>
+pkgname=strivo
+pkgver=0.3.0
+pkgrel=1
+pkgdesc="TUI Live Stream PVR for Twitch and YouTube"
+arch=('x86_64')
+url="https://github.com/revelri/strivo"
+license=('MIT')
+depends=('gcc-libs' 'ffmpeg' 'mpv' 'streamlink' 'yt-dlp')
+optdepends=('openai-whisper: local transcription via Crunchr plugin')
+makedepends=('cargo')
+provides=('strivo')
+conflicts=('strivo-git' 'strivo-bin')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+prepare() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --release --all-features
+}
+
+check() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo test --frozen --release
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+
+  install -Dm755 "target/release/$pkgname" "$pkgdir/usr/bin/$pkgname"
+
+  # License + docs
+  install -Dm644 LICENSE   "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+
+  # Shell completions
+  "$pkgdir/usr/bin/$pkgname" completions bash \
+    > /tmp/$pkgname.bash
+  install -Dm644 /tmp/$pkgname.bash \
+    "$pkgdir/usr/share/bash-completion/completions/$pkgname"
+  "$pkgdir/usr/bin/$pkgname" completions zsh \
+    > /tmp/_$pkgname
+  install -Dm644 /tmp/_$pkgname \
+    "$pkgdir/usr/share/zsh/site-functions/_$pkgname"
+  "$pkgdir/usr/bin/$pkgname" completions fish \
+    > /tmp/$pkgname.fish
+  install -Dm644 /tmp/$pkgname.fish \
+    "$pkgdir/usr/share/fish/vendor_completions.d/$pkgname.fish"
+
+  # Man page
+  "$pkgdir/usr/bin/$pkgname" man > /tmp/$pkgname.1
+  install -Dm644 /tmp/$pkgname.1 "$pkgdir/usr/share/man/man1/$pkgname.1"
+
+  # systemd user unit
+  install -Dm644 contrib/systemd/strivo.service \
+    "$pkgdir/usr/lib/systemd/user/strivo.service"
+}

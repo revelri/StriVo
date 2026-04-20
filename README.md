@@ -73,7 +73,15 @@ strivo runs in your terminal (or as a background daemon) and watches your follow
 - **streamlink** — Twitch stream resolution
 - **yt-dlp** — YouTube/Patreon stream resolution
 
-### Install & Build
+### Arch Linux (AUR)
+
+```bash
+paru -S strivo      # or: yay -S strivo
+strivo doctor       # verify ffmpeg/mpv/streamlink/yt-dlp are installed
+strivo              # first-run wizard
+```
+
+### From source
 
 ```bash
 git clone https://github.com/revelri/strivo.git

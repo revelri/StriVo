@@ -1,0 +1,51 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux:
+    name: Build x86_64-linux tarball
+    runs-on: [self-hosted, linux, x64, arch]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: rustup show active-toolchain || rustup default stable
+
+      - name: Build release
+        run: cargo build --release --locked
+
+      - name: Generate completions + manpage
+        run: |
+          mkdir -p dist/completions dist/man
+          ./target/release/strivo completions bash > dist/completions/strivo.bash
+          ./target/release/strivo completions zsh  > dist/completions/_strivo
+          ./target/release/strivo completions fish > dist/completions/strivo.fish
+          ./target/release/strivo man > dist/man/strivo.1
+
+      - name: Stage tarball
+        id: stage
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          PKG="strivo-${VERSION}-x86_64-unknown-linux-gnu"
+          mkdir -p "dist/${PKG}"
+          cp target/release/strivo    "dist/${PKG}/"
+          cp README.md LICENSE         "dist/${PKG}/"
+          cp -r dist/completions       "dist/${PKG}/"
+          cp -r dist/man               "dist/${PKG}/"
+          tar -C dist -czf "dist/${PKG}.tar.gz" "${PKG}"
+          (cd dist && sha256sum "${PKG}.tar.gz" > "${PKG}.tar.gz.sha256")
+          echo "pkg=${PKG}" >> "$GITHUB_OUTPUT"
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/${{ steps.stage.outputs.pkg }}.tar.gz
+            dist/${{ steps.stage.outputs.pkg }}.tar.gz.sha256
+          generate_release_notes: true
