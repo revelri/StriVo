@@ -335,10 +335,39 @@ impl AppConfig {
 
         let contents = std::fs::read_to_string(&path)
             .with_context(|| format!("Failed to read config from {}", path.display()))?;
-        let mut config: Self = toml::from_str(&contents)
-            .with_context(|| format!("Failed to parse config from {}", path.display()))?;
-        config.config_path = Some(path);
-        Ok(config)
+
+        match toml::from_str::<Self>(&contents) {
+            Ok(mut config) => {
+                config.config_path = Some(path);
+                Ok(config)
+            }
+            Err(parse_err) => {
+                // Live file is corrupt. Try `.backup` (previous known-good),
+                // else quarantine the bad file and fall back to defaults so
+                // the user is never stranded without a runnable config.
+                let backup = backup_path(&path);
+                if backup.exists() {
+                    if let Ok(bcontents) = std::fs::read_to_string(&backup) {
+                        if let Ok(mut config) = toml::from_str::<Self>(&bcontents) {
+                            let _ = quarantine(&path);
+                            let _ = std::fs::copy(&backup, &path);
+                            config.config_path = Some(path);
+                            return Ok(config);
+                        }
+                    }
+                }
+                let _ = quarantine(&path);
+                let mut config = Self::default();
+                config.config_path = Some(path.clone());
+                let _ = config.save(Some(&path));
+                eprintln!(
+                    "config: {} was malformed ({}); fell back to defaults",
+                    path.display(),
+                    parse_err
+                );
+                Ok(config)
+            }
+        }
     }
 
     pub fn save(&self, path: Option<&std::path::Path>) -> Result<()> {
@@ -352,10 +381,29 @@ impl AppConfig {
                 .with_context(|| format!("Failed to create config directory {}", parent.display()))?;
         }
 
+        // Rotate the prior live file into `.backup` before overwriting so
+        // a crash mid-write can never wedge the user into a broken state.
+        if path.exists() {
+            let backup = backup_path(&path);
+            let _ = std::fs::copy(&path, &backup);
+        }
+
         let contents = toml::to_string_pretty(self)
             .context("Failed to serialize config")?;
         std::fs::write(&path, contents)
             .with_context(|| format!("Failed to write config to {}", path.display()))?;
         Ok(())
     }
+}
+
+fn backup_path(path: &std::path::Path) -> PathBuf {
+    let mut s = path.to_path_buf().into_os_string();
+    s.push(".backup");
+    PathBuf::from(s)
+}
+
+fn quarantine(path: &std::path::Path) -> std::io::Result<()> {
+    let mut s = path.to_path_buf().into_os_string();
+    s.push(".corrupt");
+    std::fs::rename(path, PathBuf::from(s))
 }
