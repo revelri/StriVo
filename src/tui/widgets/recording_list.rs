@@ -11,13 +11,20 @@ use crate::platform::PlatformKind;
 use crate::recording::job::RecordingState;
 use crate::tui::theme::Theme;
 
+/// 10-frame braille spinner. Advances every 80 ms off the frame clock so the
+/// animation speed is independent of render cadence.
+const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+fn spinner_frame(elapsed_secs: f32) -> &'static str {
+    if crate::tui::anim::reduce_motion() {
+        return "⟳";
+    }
+    let idx = ((elapsed_secs / 0.08) as usize) % SPINNER_FRAMES.len();
+    SPINNER_FRAMES[idx]
+}
+
 pub fn render(frame: &mut Frame, area: Rect, app: &AppState) {
-    let focused = app.active_pane == ActivePane::RecordingList;
-    let border_style = if focused {
-        Theme::border_focused()
-    } else {
-        Theme::border()
-    };
+    let border_style = app.pane_border(&ActivePane::RecordingList);
 
     let active_count = app.active_recording_count();
     let title = if !app.search_query.is_empty() {
@@ -66,6 +73,10 @@ pub fn render(frame: &mut Frame, area: Rect, app: &AppState) {
         items.push(ListItem::new(Line::from(vec![
             Span::raw(" "),
             Span::styled(day_label, Theme::day_header()),
+            Span::raw(" "),
+            Span::styled("━", Style::new().fg(Theme::dim())),
+            Span::styled("━━━", Style::new().fg(Theme::muted())),
+            Span::styled("━", Style::new().fg(Theme::dim())),
         ])));
 
         for rec in recs {
@@ -76,22 +87,52 @@ pub fn render(frame: &mut Frame, area: Rect, app: &AppState) {
 
             let list_idx = items.len();
 
+            let secs = app.clock.elapsed().as_secs_f32();
             let state_prefix = match rec.state {
                 RecordingState::Recording => {
-                    Span::styled("● ", Theme::status_recording())
+                    // C6.7 — heartbeat: ● → ◉ alternation at 1 Hz.
+                    let glyph = if crate::tui::anim::reduce_motion() {
+                        "● "
+                    } else if (secs * 2.0) as i32 % 2 == 0 {
+                        "● "
+                    } else {
+                        "◉ "
+                    };
+                    Span::styled(glyph, Theme::status_recording())
                 }
                 RecordingState::ResolvingUrl => {
-                    Span::styled("⟳ ", Style::new().fg(Theme::secondary()))
+                    let f = spinner_frame(secs);
+                    Span::styled(format!("{f} "), Style::new().fg(Theme::secondary()))
                 }
                 RecordingState::Stopping => {
-                    Span::styled("◼ ", Style::new().fg(Theme::secondary()))
+                    // C2.5 — crossfade between the ◼ block and a dimmer ◻
+                    // outline at 0.5 Hz so the user sees it's actively stopping
+                    // vs. a stuck state.
+                    let glyph = if !crate::tui::anim::reduce_motion()
+                        && (secs * 2.0) as i32 % 2 == 0
+                    {
+                        "◼ "
+                    } else {
+                        "◻ "
+                    };
+                    Span::styled(glyph, Style::new().fg(Theme::secondary()))
                 }
                 RecordingState::Failed => {
-                    Span::styled("✗ ", Theme::error())
+                    // C2.6 — Failed flash: slow breathing pulse between theme
+                    // red and a brighter tint so the error stays eye-catching
+                    // without demanding per-job transition bookkeeping.
+                    let flash = if crate::tui::anim::reduce_motion() {
+                        0.0
+                    } else {
+                        crate::tui::anim::easing::Ease::InOutSine
+                            .apply(crate::tui::anim::pulse_phase(secs, 1.4))
+                    };
+                    let bright = ratatui::style::Color::Rgb(255, 120, 120);
+                    let color =
+                        crate::tui::theme::Theme::blend_for(Theme::red(), bright, flash);
+                    Span::styled("✗ ", Style::new().fg(color).add_modifier(Modifier::BOLD))
                 }
-                RecordingState::Finished => {
-                    Span::raw("  ")
-                }
+                RecordingState::Finished => Span::raw("  "),
             };
 
             let channel_name = Span::styled(

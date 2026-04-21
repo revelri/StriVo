@@ -10,12 +10,7 @@ use crate::app::{ActivePane, AppState};
 use crate::tui::theme::Theme;
 
 pub fn render(frame: &mut Frame, area: Rect, app: &AppState) {
-    let focused = app.active_pane == ActivePane::Log;
-    let border_style = if focused {
-        Theme::border_focused()
-    } else {
-        Theme::border()
-    };
+    let border_style = app.pane_border(&ActivePane::Log);
 
     let total = app.log_lines.len();
     let scroll_indicator = if app.log_auto_scroll {

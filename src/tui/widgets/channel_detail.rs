@@ -7,15 +7,52 @@ use ratatui::{
 };
 
 use crate::app::{ActivePane, AppState};
+use crate::tui::anim::{easing::Ease, pulse_phase, reduce_motion};
 use crate::tui::theme::Theme;
 
-pub fn render(frame: &mut Frame, area: Rect, app: &mut AppState) {
-    let focused = app.active_pane == ActivePane::Detail;
-    let border_style = if focused {
-        Theme::border_focused()
-    } else {
-        Theme::border()
+/// Derive a LIVE-badge background color pulsing 2 s between the theme's green
+/// and a slightly desaturated variant blended toward the fg. Subtle enough to
+/// catch the eye without becoming noisy.
+fn rec_bg(elapsed_secs: f32) -> ratatui::style::Color {
+    use ratatui::style::Color;
+    if reduce_motion() {
+        return Theme::red();
+    }
+    let base = match Theme::red() {
+        Color::Rgb(r, g, b) => (r as f32, g as f32, b as f32),
+        other => return other,
     };
+    let p = Ease::InOutSine.apply(pulse_phase(elapsed_secs, 2.0));
+    let factor = 0.75 + 0.25 * p;
+    Color::Rgb(
+        (base.0 * factor).round().clamp(0.0, 255.0) as u8,
+        (base.1 * factor).round().clamp(0.0, 255.0) as u8,
+        (base.2 * factor).round().clamp(0.0, 255.0) as u8,
+    )
+}
+
+fn live_bg(elapsed_secs: f32) -> ratatui::style::Color {
+    use ratatui::style::Color;
+    if reduce_motion() {
+        return Theme::green();
+    }
+    let base = match Theme::green() {
+        Color::Rgb(r, g, b) => (r as f32, g as f32, b as f32),
+        other => return other,
+    };
+    let p = Ease::InOutSine.apply(pulse_phase(elapsed_secs, 2.0));
+    // Modulate brightness in [0.75, 1.0] so the badge never dims to the point
+    // of disappearing against the card.
+    let factor = 0.75 + 0.25 * p;
+    Color::Rgb(
+        (base.0 * factor).round().clamp(0.0, 255.0) as u8,
+        (base.1 * factor).round().clamp(0.0, 255.0) as u8,
+        (base.2 * factor).round().clamp(0.0, 255.0) as u8,
+    )
+}
+
+pub fn render(frame: &mut Frame, area: Rect, app: &mut AppState) {
+    let border_style = app.pane_border(&ActivePane::Detail);
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -75,7 +112,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut AppState) {
             " LIVE ",
             Style::new()
                 .fg(Theme::bg())
-                .bg(Theme::green())
+                .bg(live_bg(app.clock.elapsed().as_secs_f32()))
                 .add_modifier(Modifier::BOLD),
         )
     } else {
@@ -90,7 +127,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut AppState) {
             " REC ",
             Style::new()
                 .fg(Theme::bg())
-                .bg(Theme::red())
+                .bg(rec_bg(app.clock.elapsed().as_secs_f32()))
                 .add_modifier(Modifier::BOLD),
         )
     } else {
@@ -149,12 +186,27 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut AppState) {
         info_area,
     );
 
-    // Render thumbnail with rounded border
+    // Render thumbnail with rounded border. C6.1 — when the thumbnail
+    // protocol was refreshed recently, ramp the border color from primary
+    // → dim over 600 ms so the user notices the image updated (the image
+    // bitmap itself is opaque via ratatui-image, so we can't alpha-blend
+    // the pixels directly).
     let channel_id = channel.id.clone();
+    let thumb_border = app
+        .thumbnail_changed_at
+        .get(&channel_id)
+        .map(|at| at.elapsed().as_secs_f32())
+        .filter(|secs| *secs < 0.6 && !crate::tui::anim::reduce_motion())
+        .map(|secs| {
+            let t = (secs / 0.6).clamp(0.0, 1.0);
+            let eased = crate::tui::anim::easing::Ease::OutCubic.apply(t);
+            Style::new().fg(Theme::blend_for(Theme::primary(), Theme::dim(), eased))
+        })
+        .unwrap_or_else(Theme::border);
     let thumb_block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Theme::border())
+        .border_style(thumb_border)
         .title(" Preview ")
         .title_style(Style::new().fg(Theme::muted()));
     let thumb_inner = thumb_block.inner(thumbnail_area);

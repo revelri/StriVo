@@ -36,7 +36,9 @@ pub fn render(frame: &mut Frame, area: Rect, app: &AppState, kind: PlatformKind)
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Theme::border_focused())
+        .border_style(Theme::border_ramp(
+            app.overlay_enter(crate::app::OverlayKey::PlatformDebug, 0.18),
+        ))
         .title(format!(" {platform_name} Status "))
         .title_style(Theme::title());
 

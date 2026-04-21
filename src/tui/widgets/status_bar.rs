@@ -9,24 +9,81 @@ use ratatui::{
 use crate::app::{ActivePane, AppState};
 use crate::platform::PlatformKind;
 use crate::plugin::registry::PluginRegistry;
+use crate::tui::anim::{easing::Ease, pulse_phase, reduce_motion};
 use crate::tui::theme::Theme;
 
-/// REC-dot pulse style keyed off the frame tick. Oscillates opacity with a
-/// ~2 s ease-in-out cycle (DESIGN.md signature motion) so a live recording
-/// is never mistaken for a static indicator. Never goes fully transparent.
-fn rec_pulse_style(tick: u64) -> Style {
-    const CYCLE: u64 = 60;
-    let phase = (tick % CYCLE) as f32 / CYCLE as f32;
-    let o = 0.7 + 0.3 * (std::f32::consts::TAU * phase).cos();
-    let base = 0.2;
-    let o = (o * (1.0 - base) + base).clamp(0.0, 1.0);
-    let r = (0xFF as f32 * o) as u8;
-    let g = (0x44 as f32 * o) as u8;
-    let b = (0x44 as f32 * o) as u8;
-    Style::new()
-        .fg(Color::Rgb(r, g, b))
-        .bg(Theme::hotkey_bar().bg.unwrap_or(Theme::bg()))
-        .add_modifier(Modifier::BOLD)
+/// REC-dot pulse style. Time-based 2 s ease-in-out cycle (DESIGN.md signature
+/// motion); never fully transparent (min opacity 0.25). Honors reduced motion.
+fn rec_pulse_style(elapsed_secs: f32) -> Style {
+    let opacity = if reduce_motion() {
+        1.0
+    } else {
+        let p = pulse_phase(elapsed_secs, 2.0);
+        let eased = Ease::InOutSine.apply(p);
+        0.25 + 0.75 * eased
+    };
+    let red = Theme::red();
+    let bg = Theme::hotkey_bar().bg.unwrap_or(Theme::bg());
+    let fg = scale_rgb(red, opacity, bg);
+    Style::new().fg(fg).bg(bg).add_modifier(Modifier::BOLD)
+}
+
+/// Search-cursor opacity tween — smooth 1.2 s ease-in-out blink (replaces the
+/// ratatui hard-blink which felt jittery against the bar background).
+fn search_cursor_color(elapsed_secs: f32) -> Color {
+    if reduce_motion() {
+        return Theme::primary();
+    }
+    let p = pulse_phase(elapsed_secs, 1.2);
+    let eased = Ease::InOutSine.apply(p);
+    let opacity = 0.35 + 0.65 * eased;
+    scale_rgb(
+        Theme::primary(),
+        opacity,
+        Theme::hotkey_bar().bg.unwrap_or(Theme::bg()),
+    )
+}
+
+/// Status-message alpha — 200 ms Ease::Standard enter ramp, hold until 4.5 s,
+/// then 500 ms InCubic fade-out blend against the hotkey-bar background.
+/// App-level dismissal happens at ~5 s, so this is a perceptual hand-off
+/// rather than a separate timer.
+fn status_message_color(age_secs: f32) -> Color {
+    if reduce_motion() {
+        return Theme::fg();
+    }
+    let alpha = if age_secs < 0.2 {
+        Ease::Standard.apply((age_secs / 0.2).clamp(0.0, 1.0))
+    } else if age_secs < 4.5 {
+        1.0
+    } else {
+        let t = ((age_secs - 4.5) / 0.5).clamp(0.0, 1.0);
+        1.0 - Ease::InCubic.apply(t)
+    };
+    scale_rgb(
+        Theme::fg(),
+        alpha,
+        Theme::hotkey_bar().bg.unwrap_or(Theme::bg()),
+    )
+}
+
+/// Blend `color` toward `bg` by `(1 - opacity)`. Returns a flattened RGB so
+/// terminals without true-color alpha still see the dimming effect.
+fn scale_rgb(color: Color, opacity: f32, bg: Color) -> Color {
+    let opacity = opacity.clamp(0.0, 1.0);
+    let (cr, cg, cb) = match color {
+        Color::Rgb(r, g, b) => (r as f32, g as f32, b as f32),
+        _ => return color,
+    };
+    let (br, bg_, bb) = match bg {
+        Color::Rgb(r, g, b) => (r as f32, g as f32, b as f32),
+        _ => (0.0, 0.0, 0.0),
+    };
+    Color::Rgb(
+        (br + (cr - br) * opacity).round().clamp(0.0, 255.0) as u8,
+        (bg_ + (cg - bg_) * opacity).round().clamp(0.0, 255.0) as u8,
+        (bb + (cb - bb) * opacity).round().clamp(0.0, 255.0) as u8,
+    )
 }
 
 pub fn render(frame: &mut Frame, area: Rect, app: &AppState, registry: &PluginRegistry) {
@@ -37,6 +94,17 @@ pub fn render(frame: &mut Frame, area: Rect, app: &AppState, registry: &PluginRe
     // Persistent banner while the daemon socket is down — overrides
     // everything else so the user can never mistake stale data for live.
     if !app.daemon_connected {
+        // 200 ms enter ramp: the banner's fg eases from bar_bg → red so the
+        // appearance is a smooth reveal instead of a jarring color flip.
+        let enter = app
+            .daemon_disconnected_at
+            .map(|at| (at.elapsed().as_secs_f32() / 0.2).clamp(0.0, 1.0))
+            .unwrap_or(1.0);
+        let enter = if reduce_motion() {
+            1.0
+        } else {
+            Ease::Standard.apply(enter)
+        };
         let msg = format!(
             " ⚠  Daemon disconnected — reconnecting (attempt {}) ",
             app.daemon_reconnect_attempts
@@ -46,7 +114,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &AppState, registry: &PluginRe
             Span::styled(
                 msg,
                 Style::new()
-                    .fg(Theme::red())
+                    .fg(scale_rgb(Theme::red(), enter, bar_bg))
                     .bg(bar_bg)
                     .add_modifier(Modifier::BOLD),
             ),
@@ -67,13 +135,14 @@ pub fn render(frame: &mut Frame, area: Rect, app: &AppState, registry: &PluginRe
         let used = 2 + left.chars().count() + 1 + right.chars().count(); // " /" + left + cursor + right
         let pad = area.width.saturating_sub(used as u16) as usize;
 
+        let cursor_color = search_cursor_color(app.clock.elapsed().as_secs_f32());
         let search_bar = Line::from(vec![
             Span::styled(" /", Style::new().fg(Theme::secondary()).bg(bar_bg)),
             Span::styled(left, Style::new().fg(Theme::fg()).bg(bar_bg)),
             Span::styled(
                 "▌",
                 Style::new()
-                    .fg(Theme::primary())
+                    .fg(cursor_color)
                     .bg(bar_bg)
                     .add_modifier(Modifier::BOLD),
             ),
@@ -88,9 +157,9 @@ pub fn render(frame: &mut Frame, area: Rect, app: &AppState, registry: &PluginRe
     if app.active_pane == ActivePane::StatusBar {
         let mut spans: Vec<Span> = Vec::new();
         spans.push(Span::styled(" ", bar_style));
-        push_button(&mut spans, "Select", "←→", bar_style, key_style);
-        push_button(&mut spans, "Debug", "Enter", bar_style, key_style);
-        push_button(&mut spans, "Back", "Esc", bar_style, key_style);
+        push_button(&mut spans, "Select", "←→", bar_style, key_style, None, bar_bg);
+        push_button(&mut spans, "Debug", "Enter", bar_style, key_style, None, bar_bg);
+        push_button(&mut spans, "Back", "Esc", bar_style, key_style, None, bar_bg);
 
         let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
         let indicators = build_indicators(app, bar_bg, Some(app.selected_indicator));
@@ -121,12 +190,16 @@ pub fn render(frame: &mut Frame, area: Rect, app: &AppState, registry: &PluginRe
     if !app.status_message.is_empty() {
         let msg = app.status_message.clone();
         let pad = area.width.saturating_sub(msg.chars().count() as u16 + 1) as usize;
+        let age = app
+            .status_message_at
+            .map(|at| at.elapsed().as_secs_f32())
+            .unwrap_or(0.0);
         let line = Line::from(vec![
             Span::styled(" ", bar_style),
             Span::styled(
                 msg,
                 Style::new()
-                    .fg(Theme::fg())
+                    .fg(status_message_color(age))
                     .bg(bar_bg)
                     .add_modifier(Modifier::BOLD),
             ),
@@ -156,7 +229,10 @@ pub fn render(frame: &mut Frame, area: Rect, app: &AppState, registry: &PluginRe
     // Pulsing REC dot when a recording is active (DESIGN.md signature motion).
     let active_recordings = app.active_recording_count();
     if active_recordings > 0 {
-        spans.push(Span::styled("● ", rec_pulse_style(app.tick_counter)));
+        spans.push(Span::styled(
+            "● ",
+            rec_pulse_style(app.clock.elapsed().as_secs_f32()),
+        ));
         spans.push(Span::styled(
             format!("REC({active_recordings}) "),
             Style::new()
@@ -166,28 +242,30 @@ pub fn render(frame: &mut Frame, area: Rect, app: &AppState, registry: &PluginRe
         ));
     }
 
+    let shimmer = hotkey_shimmer_char(app);
+
     // Context-sensitive buttons
     match app.active_pane {
         ActivePane::Detail => {
-            push_button(&mut spans, "Record", "r", bar_style, key_style);
-            push_button(&mut spans, "Watch", "w", bar_style, key_style);
+            push_button(&mut spans, "Record", "r", bar_style, key_style, shimmer, bar_bg);
+            push_button(&mut spans, "Watch", "w", bar_style, key_style, shimmer, bar_bg);
         }
         ActivePane::RecordingList => {
-            push_button(&mut spans, "Stop", "s", bar_style, key_style);
-            push_button(&mut spans, "Play", "p", bar_style, key_style);
-            push_button(&mut spans, "Info", "i", bar_style, key_style);
+            push_button(&mut spans, "Stop", "s", bar_style, key_style, shimmer, bar_bg);
+            push_button(&mut spans, "Play", "p", bar_style, key_style, shimmer, bar_bg);
+            push_button(&mut spans, "Info", "i", bar_style, key_style, shimmer, bar_bg);
         }
         _ => {}
     }
 
     // Always-visible buttons
-    push_button(&mut spans, "Search", "/", bar_style, key_style);
-    push_button(&mut spans, "Intel", "I", bar_style, key_style);
-    push_button(&mut spans, "Config", "C", bar_style, key_style);
-    push_button(&mut spans, "Help", "?", bar_style, key_style);
-    push_button(&mut spans, "Recordings", "L", bar_style, key_style);
-    push_button(&mut spans, "Log", "F", bar_style, key_style);
-    push_button(&mut spans, "Quit", "q", bar_style, key_style);
+    push_button(&mut spans, "Search", "/", bar_style, key_style, shimmer, bar_bg);
+    push_button(&mut spans, "Intel", "I", bar_style, key_style, shimmer, bar_bg);
+    push_button(&mut spans, "Config", "C", bar_style, key_style, shimmer, bar_bg);
+    push_button(&mut spans, "Help", "?", bar_style, key_style, shimmer, bar_bg);
+    push_button(&mut spans, "Recordings", "L", bar_style, key_style, shimmer, bar_bg);
+    push_button(&mut spans, "Log", "F", bar_style, key_style, shimmer, bar_bg);
+    push_button(&mut spans, "Quit", "q", bar_style, key_style, shimmer, bar_bg);
 
     let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
     let total_width = area.width as usize;
@@ -293,12 +371,42 @@ fn push_button<'a>(
     key: &'a str,
     bar_style: Style,
     key_style: Style,
+    shimmer: Option<(char, f32)>,
+    bar_bg: Color,
 ) {
+    // When a matching key was just pressed, ramp its fg secondary → primary
+    // → secondary over 240 ms so the key visibly "fires".
+    let ks = match shimmer {
+        Some((c, t)) if key.chars().next() == Some(c) => {
+            let tri = if t < 0.5 { t * 2.0 } else { (1.0 - t) * 2.0 };
+            let blended = Theme::blend_for(Theme::secondary(), Theme::primary(), tri);
+            Style::new()
+                .fg(blended)
+                .bg(bar_bg)
+                .add_modifier(Modifier::BOLD)
+        }
+        _ => key_style,
+    };
     spans.push(Span::styled(label, bar_style));
     spans.push(Span::styled(" [", bar_style));
-    spans.push(Span::styled(key, key_style));
+    spans.push(Span::styled(key, ks));
     spans.push(Span::styled("]", bar_style));
     spans.push(Span::styled(" ", bar_style)); // 1-char gap
+}
+
+/// Returns `Some((char, t))` when a hotkey was pressed in the last 240 ms.
+/// `t` is the normalized progress through the shimmer animation.
+fn hotkey_shimmer_char(app: &AppState) -> Option<(char, f32)> {
+    if reduce_motion() {
+        return None;
+    }
+    let at = app.last_hotkey_at?;
+    let c = app.last_hotkey?;
+    let elapsed = at.elapsed().as_secs_f32();
+    if elapsed > 0.24 {
+        return None;
+    }
+    Some((c, (elapsed / 0.24).clamp(0.0, 1.0)))
 }
 
 /// Returns `(matched, total)` for the pane the filter currently applies to.

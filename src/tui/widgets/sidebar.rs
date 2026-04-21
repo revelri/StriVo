@@ -22,11 +22,7 @@ enum SidebarEntry {
 
 pub fn render(frame: &mut Frame, area: Rect, app: &mut AppState) {
     let focused = app.active_pane == ActivePane::Sidebar;
-    let border_style = if focused {
-        Theme::border_focused()
-    } else {
-        Theme::border()
-    };
+    let border_style = app.pane_border(&ActivePane::Sidebar);
 
     let title = if !app.search_query.is_empty() {
         format!(" Channels [/{query}] ", query = app.search_query)

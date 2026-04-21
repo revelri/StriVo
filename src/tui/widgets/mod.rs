@@ -8,3 +8,4 @@ pub mod settings;
 pub mod log_viewer;
 pub mod platform_debug;
 pub mod properties;
+pub mod theme_picker;

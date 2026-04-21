@@ -30,7 +30,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &AppState) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Theme::border_focused())
+        .border_style(Theme::border_ramp(app.overlay_enter(crate::app::OverlayKey::Wizard, 0.24)))
         .title(" Setup Wizard ")
         .title_style(Theme::title());
 

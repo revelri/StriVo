@@ -202,6 +202,10 @@ pub struct AppState {
     /// Number of reconnect attempts since the last successful connection.
     /// Used to render the reconnect banner's "(attempt N)" counter.
     pub daemon_reconnect_attempts: u32,
+    /// When the most recent disconnect was observed. Drives the banner's
+    /// slide-in / fade-in animation so the transition is perceptibly smooth
+    /// instead of a hard color flip.
+    pub daemon_disconnected_at: Option<std::time::Instant>,
 
     // Settings edit state
     pub settings_selected: usize,
@@ -221,6 +225,10 @@ pub struct AppState {
     // Sidebar scroll offsets for autoscroll (channel index → text scroll offset)
     pub scroll_offsets: HashMap<usize, usize>,
     pub tick_counter: u64,
+    /// Monotonic frame clock for time-based animations. Advanced once per
+    /// render loop iteration; widgets read `dt()` / `elapsed()` for tweens
+    /// and periodic pulses. See `src/tui/anim`.
+    pub clock: crate::tui::anim::FrameClock,
     // Track previously selected channel for resetting scroll offset
     prev_selected_channel: usize,
     /// Shadow copy of `status_message` from the previous tick, used to
@@ -252,6 +260,76 @@ pub struct AppState {
     pub show_properties: Option<Uuid>,
     /// Cached media info from ffprobe.
     pub media_info_cache: HashMap<Uuid, crate::media::MediaInfo>,
+
+    /// Theme picker overlay state. `Some` while the picker modal is open.
+    pub theme_picker: Option<ThemePickerState>,
+
+    /// Last observed active pane (at render time). Compared to `active_pane`
+    /// to detect focus changes and restart the border-ramp animation.
+    pub prev_render_pane: ActivePane,
+    /// Which pane just lost focus (set at the focus-change frame, cleared
+    /// once the unfocused-ramp duration has elapsed). Used by
+    /// [`Self::pane_border`] to animate the leaving pane alongside the
+    /// arriving one.
+    pub pane_lost_focus: Option<ActivePane>,
+    /// When the active pane last changed. Drives the focused-border fade-in.
+    pub pane_focus_at: std::time::Instant,
+
+    // Overlay open timestamps — `Some` iff the corresponding overlay is
+    // currently on screen. Shared helper `overlay_enter()` reads these to
+    // produce the entrance-animation progress for widgets.
+    pub help_opened_at: Option<std::time::Instant>,
+    pub quit_confirm_opened_at: Option<std::time::Instant>,
+    pub properties_opened_at: Option<std::time::Instant>,
+    pub platform_debug_opened_at: Option<std::time::Instant>,
+    pub wizard_opened_at: Option<std::time::Instant>,
+    pub stopping_opened_at: Option<std::time::Instant>,
+
+    /// Last hotkey pressed + when — drives the hotkey-bar shimmer.
+    pub last_hotkey: Option<char>,
+    pub last_hotkey_at: Option<std::time::Instant>,
+
+    /// When each channel's thumbnail protocol last changed. Drives
+    /// per-channel thumbnail crossfade in the detail pane.
+    pub thumbnail_changed_at: std::collections::HashMap<String, std::time::Instant>,
+
+    /// Number of active tweens — incremented on register, decremented on
+    /// completion. When zero + no pending input, run loop widens poll to
+    /// conserve CPU (adaptive frame rate — P6).
+    pub active_tweens: u32,
+
+    /// Smooth log auto-scroll target; `log_scroll` eases toward this.
+    pub log_scroll_target: usize,
+}
+
+/// Which overlay to query via [`AppState::overlay_enter`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OverlayKey {
+    Help,
+    QuitConfirm,
+    Properties,
+    PlatformDebug,
+    Wizard,
+    Stopping,
+}
+
+/// Live state for the theme picker overlay. Preview is applied immediately
+/// when the cursor changes so the user sees theme switches in real time;
+/// `snapshot` captures the pre-picker theme so `Esc` can undo.
+pub struct ThemePickerState {
+    pub themes: Vec<String>,
+    pub selected: usize,
+    pub snapshot: crate::tui::theme::ThemeData,
+    /// When the picker opened. Drives the enter animation.
+    pub opened_at: std::time::Instant,
+}
+
+fn sync_open(slot: &mut Option<std::time::Instant>, shown: bool) {
+    match (shown, slot.is_some()) {
+        (true, false) => *slot = Some(std::time::Instant::now()),
+        (false, true) => *slot = None,
+        _ => {}
+    }
 }
 
 impl AppState {
@@ -297,6 +375,7 @@ impl AppState {
             poll_notify_standalone: None,
             daemon_connected: true,
             daemon_reconnect_attempts: 0,
+            daemon_disconnected_at: None,
             settings_selected: 0,
             log_lines: Vec::new(),
             log_scroll: 0,
@@ -306,6 +385,7 @@ impl AppState {
             sidebar_order: Vec::new(),
             scroll_offsets: HashMap::new(),
             tick_counter: 0,
+            clock: crate::tui::anim::FrameClock::new(),
             prev_selected_channel: 0,
             prev_status_message: String::new(),
             search_active: false,
@@ -319,6 +399,190 @@ impl AppState {
             prev_pane: None,
             show_properties: None,
             media_info_cache: HashMap::new(),
+            theme_picker: None,
+            prev_render_pane: if first_run {
+                ActivePane::Wizard
+            } else {
+                ActivePane::Sidebar
+            },
+            pane_lost_focus: None,
+            pane_focus_at: std::time::Instant::now(),
+            help_opened_at: None,
+            quit_confirm_opened_at: None,
+            properties_opened_at: None,
+            platform_debug_opened_at: None,
+            wizard_opened_at: if first_run { Some(std::time::Instant::now()) } else { None },
+            stopping_opened_at: None,
+            last_hotkey: None,
+            last_hotkey_at: None,
+            thumbnail_changed_at: HashMap::new(),
+            active_tweens: 0,
+            log_scroll_target: 0,
+        }
+    }
+
+    /// Eased entrance progress in [0, 1] for the requested overlay. Returns
+    /// 1.0 when the overlay isn't open or reduce-motion is active.
+    pub fn overlay_enter(&self, key: OverlayKey, duration_secs: f32) -> f32 {
+        let at = match key {
+            OverlayKey::Help => self.help_opened_at,
+            OverlayKey::QuitConfirm => self.quit_confirm_opened_at,
+            OverlayKey::Properties => self.properties_opened_at,
+            OverlayKey::PlatformDebug => self.platform_debug_opened_at,
+            OverlayKey::Wizard => self.wizard_opened_at,
+            OverlayKey::Stopping => self.stopping_opened_at,
+        };
+        let Some(at) = at else {
+            return 1.0;
+        };
+        if crate::tui::anim::reduce_motion() {
+            return 1.0;
+        }
+        let raw = (at.elapsed().as_secs_f32() / duration_secs).clamp(0.0, 1.0);
+        crate::tui::anim::easing::Ease::Standard.apply(raw)
+    }
+
+    /// Must be called once per frame before widgets render. Keeps overlay
+    /// `opened_at` fields in sync with their boolean / Option flags and
+    /// resets timestamps when overlays open or close.
+    pub fn update_overlay_timing(&mut self) {
+        sync_open(&mut self.help_opened_at, self.show_help);
+        sync_open(&mut self.quit_confirm_opened_at, self.quit_confirm);
+        sync_open(&mut self.properties_opened_at, self.show_properties.is_some());
+        sync_open(
+            &mut self.platform_debug_opened_at,
+            self.show_platform_debug.is_some(),
+        );
+        let wizard_live =
+            self.active_pane == ActivePane::Wizard || self.pending_auth.is_some();
+        sync_open(&mut self.wizard_opened_at, wizard_live);
+        sync_open(&mut self.stopping_opened_at, self.stop_all_deadline.is_some());
+    }
+
+    /// Seconds since the active pane last changed. Used by widget borders to
+    /// ramp in a cyan glow on focus (see `Theme::border_focused_ramp`).
+    pub fn focus_fade_secs(&self) -> f32 {
+        self.pane_focus_at.elapsed().as_secs_f32()
+    }
+
+    /// Must be called once per frame before widgets render so pane-focus
+    /// transitions get a fresh start timestamp when the active pane changes.
+    pub fn update_focus_timing(&mut self) {
+        if self.prev_render_pane != self.active_pane {
+            self.pane_lost_focus = Some(self.prev_render_pane.clone());
+            self.pane_focus_at = std::time::Instant::now();
+            self.prev_render_pane = self.active_pane.clone();
+        } else if self
+            .pane_lost_focus
+            .is_some()
+            && self.pane_focus_at.elapsed().as_secs_f32() > 0.14
+        {
+            // Unfocused ramp has settled — stop drawing it.
+            self.pane_lost_focus = None;
+        }
+    }
+
+    /// Returns `true` when at least one animation is live, so the TUI run
+    /// loop should stay at the 16 ms fast cadence. When everything is quiet
+    /// it drops to a slower poll (see `poll_duration`) to conserve CPU.
+    pub fn needs_fast_frame(&self) -> bool {
+        // Always-on surfaces with periodic motion.
+        if self.theme_picker.is_some() {
+            return true;
+        }
+        if self.search_active {
+            return true;
+        }
+        if self.active_recording_count() > 0 {
+            return true;
+        }
+        // Anything resolving or stopping is animated.
+        let has_transient_state = self.recordings.values().any(|r| {
+            matches!(
+                r.state,
+                crate::recording::job::RecordingState::ResolvingUrl
+                    | crate::recording::job::RecordingState::Stopping
+                    | crate::recording::job::RecordingState::Failed
+            )
+        });
+        if has_transient_state {
+            return true;
+        }
+        // Any live channel pulses the LIVE badge in channel_detail.
+        if self.channels.iter().any(|c| c.is_live) {
+            return true;
+        }
+        // Transient bounded animations — check whether their timer is still
+        // within the active window (with slack to cover the tail).
+        let within =
+            |at: Option<std::time::Instant>, limit_secs: f32| -> bool {
+                at.map(|t| t.elapsed().as_secs_f32() < limit_secs)
+                    .unwrap_or(false)
+            };
+        if within(self.last_hotkey_at, 0.28) {
+            return true;
+        }
+        if within(Some(self.pane_focus_at), 0.22) {
+            return true;
+        }
+        if within(self.help_opened_at, 0.22)
+            || within(self.quit_confirm_opened_at, 0.22)
+            || within(self.properties_opened_at, 0.22)
+            || within(self.platform_debug_opened_at, 0.22)
+            || within(self.wizard_opened_at, 0.28)
+            || within(self.stopping_opened_at, 0.22)
+        {
+            return true;
+        }
+        if within(self.daemon_disconnected_at, 0.24) {
+            return true;
+        }
+        if self
+            .thumbnail_changed_at
+            .values()
+            .any(|t| t.elapsed().as_secs_f32() < 0.65)
+        {
+            return true;
+        }
+        if self
+            .status_message_at
+            .map(|t| t.elapsed().as_secs_f32() > 4.3 && t.elapsed().as_secs_f32() < 5.2)
+            .unwrap_or(false)
+        {
+            // Toast fade window.
+            return true;
+        }
+        false
+    }
+
+    /// Frame duration to use for this frame. 16 ms when something is
+    /// animating, 120 ms when the UI is quiescent.
+    pub fn poll_duration(&self) -> std::time::Duration {
+        if crate::tui::anim::reduce_motion() {
+            return std::time::Duration::from_millis(120);
+        }
+        if self.needs_fast_frame() {
+            std::time::Duration::from_millis(16)
+        } else {
+            std::time::Duration::from_millis(120)
+        }
+    }
+
+    /// Border style for a pane, picking the right focus animation.
+    ///
+    /// - Currently active pane → dim → primary fade-in (180 ms).
+    /// - Pane that just lost focus → primary → dim fade-out (120 ms).
+    /// - Otherwise → static dim.
+    pub fn pane_border(&self, this: &ActivePane) -> ratatui::style::Style {
+        use crate::tui::theme::Theme;
+        if self.active_pane == *this {
+            Theme::border_focused_ramp(self.focus_fade_secs())
+        } else if self.pane_lost_focus.as_ref() == Some(this)
+            && self.focus_fade_secs() < 0.14
+        {
+            Theme::border_unfocused_ramp(self.focus_fade_secs())
+        } else {
+            Theme::border()
         }
     }
 
@@ -458,6 +722,8 @@ impl AppState {
                 self.thumbnail_cache.insert(channel_id.clone(), path);
             }
             AppEvent::ThumbnailDecoded { channel_id, protocol } => {
+                self.thumbnail_changed_at
+                    .insert(channel_id.clone(), std::time::Instant::now());
                 self.thumbnail_protocols.insert(channel_id, protocol);
             }
             AppEvent::WatchResolved { channel_name, stream_url } => {
@@ -477,6 +743,9 @@ impl AppState {
                 self.media_info_cache.insert(job_id, info);
             }
             AppEvent::DaemonDisconnected => {
+                if self.daemon_connected {
+                    self.daemon_disconnected_at = Some(std::time::Instant::now());
+                }
                 self.daemon_connected = false;
                 self.daemon_reconnect_attempts = self.daemon_reconnect_attempts.saturating_add(1);
                 self.status_message = "⚠ Daemon disconnected — reconnecting…".to_string();
@@ -484,6 +753,7 @@ impl AppState {
             AppEvent::DaemonReconnected => {
                 self.daemon_connected = true;
                 self.daemon_reconnect_attempts = 0;
+                self.daemon_disconnected_at = None;
                 self.status_message = "✓ Daemon reconnected".to_string();
             }
         }
@@ -622,6 +892,13 @@ impl AppState {
             return None;
         }
 
+        // C5.2 — remember the last character keypress so the status-bar
+        // hotkey it corresponds to can shimmer briefly.
+        if let KeyCode::Char(c) = key.code {
+            self.last_hotkey = Some(c);
+            self.last_hotkey_at = Some(std::time::Instant::now());
+        }
+
         // Search mode input handling — intercept all keys
         if self.search_active {
             match key.code {
@@ -720,6 +997,12 @@ impl AppState {
             }
         }
 
+        // Theme picker overlay — swallows all keys while open.
+        if self.theme_picker.is_some() {
+            self.handle_theme_picker_key(key);
+            return None;
+        }
+
         // Modal overlay dismiss (before global/pane keys)
         if self.show_platform_debug.is_some() {
             if matches!(key.code, KeyCode::Esc | KeyCode::Enter) {
@@ -760,6 +1043,11 @@ impl AppState {
                 self.show_help = !self.show_help;
                 return None;
             }
+            // Ctrl+T: open theme picker overlay
+            KeyCode::Char('t') if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) => {
+                self.open_theme_picker();
+                return None;
+            }
             KeyCode::Esc if self.show_help => {
                 self.show_help = false;
                 return None;
@@ -796,6 +1084,110 @@ impl AppState {
             // Plugin key events handled by caller which owns the registry
             ActivePane::Plugin(_) => None,
             ActivePane::StatusBar => self.handle_status_bar_key(key),
+        }
+    }
+
+    /// Open the theme picker, snapshot current theme so Esc can revert.
+    pub fn open_theme_picker(&mut self) {
+        let themes = crate::tui::theme::available_themes();
+        if themes.is_empty() {
+            self.status_message = "No themes found".to_string();
+            return;
+        }
+        let current = crate::tui::theme::Theme::current_name();
+        let selected = themes.iter().position(|t| *t == current).unwrap_or(0);
+        self.theme_picker = Some(ThemePickerState {
+            themes,
+            selected,
+            snapshot: crate::tui::theme::Theme::snapshot(),
+            opened_at: std::time::Instant::now(),
+        });
+    }
+
+    /// Apply the currently-selected picker theme as a transient preview.
+    fn preview_picker_selection(&self) {
+        let Some(ref state) = self.theme_picker else {
+            return;
+        };
+        let Some(name) = state.themes.get(state.selected) else {
+            return;
+        };
+        crate::tui::theme::Theme::set_with_overrides(
+            name,
+            self.config.theme.colors(),
+            self.config.theme.ansi(),
+        );
+    }
+
+    fn handle_theme_picker_key(&mut self, key: crossterm::event::KeyEvent) {
+        use crossterm::event::KeyCode;
+        let Some(state) = self.theme_picker.as_mut() else {
+            return;
+        };
+        match key.code {
+            KeyCode::Down | KeyCode::Char('j') => {
+                if !state.themes.is_empty() {
+                    state.selected = (state.selected + 1) % state.themes.len();
+                }
+                self.preview_picker_selection();
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                if !state.themes.is_empty() {
+                    state.selected = if state.selected == 0 {
+                        state.themes.len() - 1
+                    } else {
+                        state.selected - 1
+                    };
+                }
+                self.preview_picker_selection();
+            }
+            KeyCode::Home | KeyCode::Char('g') => {
+                state.selected = 0;
+                self.preview_picker_selection();
+            }
+            KeyCode::End | KeyCode::Char('G') => {
+                state.selected = state.themes.len().saturating_sub(1);
+                self.preview_picker_selection();
+            }
+            KeyCode::Char('r') | KeyCode::Char('R') => {
+                let current_name = state
+                    .themes
+                    .get(state.selected)
+                    .cloned()
+                    .unwrap_or_default();
+                let rescanned = crate::tui::theme::available_themes();
+                let new_selected = rescanned
+                    .iter()
+                    .position(|t| *t == current_name)
+                    .unwrap_or(0);
+                state.themes = rescanned;
+                state.selected = new_selected;
+                self.preview_picker_selection();
+                self.status_message = "Themes rescanned".to_string();
+            }
+            KeyCode::Enter => {
+                let picked = state
+                    .themes
+                    .get(state.selected)
+                    .cloned()
+                    .unwrap_or_default();
+                self.theme_picker = None;
+                if !picked.is_empty() {
+                    self.config.theme.set_name(picked.clone());
+                    if let Err(e) = self.config.save(None) {
+                        tracing::warn!("theme picker: save failed: {e}");
+                        self.status_message = format!("Theme save failed: {e}");
+                    } else {
+                        self.status_message = format!("Theme: {picked}");
+                    }
+                }
+            }
+            KeyCode::Esc => {
+                let snap = state.snapshot.clone();
+                self.theme_picker = None;
+                crate::tui::theme::Theme::restore(snap);
+            }
+            _ => {}
         }
     }
 
@@ -1180,8 +1572,12 @@ impl AppState {
                             let current = crate::tui::theme::Theme::current_name();
                             let idx = themes.iter().position(|t| *t == current).unwrap_or(0);
                             let next = (idx + 1) % themes.len();
-                            crate::tui::theme::Theme::set(&themes[next]);
-                            self.config.theme = themes[next].clone();
+                            crate::tui::theme::Theme::set_with_overrides(
+                                &themes[next],
+                                self.config.theme.colors(),
+                                self.config.theme.ansi(),
+                            );
+                            self.config.theme.set_name(themes[next].clone());
                             self.status_message = format!("Theme: {}", themes[next]);
                             // Config save deferred to pane exit (debounce).
                         }

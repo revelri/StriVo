@@ -1,3 +1,4 @@
+pub mod anim;
 pub mod event;
 pub mod layout;
 pub mod theme;
@@ -15,7 +16,11 @@ use std::path::PathBuf;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
-const FRAME_DURATION: Duration = Duration::from_millis(33); // ~30fps
+/// Upper bound on frame cadence. Per-frame actual cadence comes from
+/// [`crate::app::AppState::poll_duration`], which drops to a slower poll
+/// (~120 ms) when no animation is active so the UI doesn't burn CPU sitting
+/// idle. See P6 in DESIGN-TODOS.
+const FRAME_DURATION: Duration = Duration::from_millis(16);
 
 pub async fn run(
     mut app: AppState,
@@ -48,15 +53,23 @@ async fn run_loop(
     let (internal_tx, mut internal_rx) = mpsc::unbounded_channel::<AppEvent>();
 
     loop {
+        app.clock.tick();
         terminal.draw(|frame| layout::render(frame, app, registry))?;
 
-        // Poll crossterm events
-        if let Some(evt) = event::poll_event(FRAME_DURATION)? {
+        // Poll crossterm events — adaptive cadence (16 ms during motion,
+        // 120 ms when idle) to conserve CPU while preserving the 60 fps feel.
+        let poll = app.poll_duration().min(FRAME_DURATION * 8);
+        if let Some(evt) = event::poll_event(poll)? {
             // Handle plugin key routing before app gets the event
             if let AppEvent::Key(ref key) = evt {
                 if key.kind == crossterm::event::KeyEventKind::Press {
-                    // Plugin activation commands (global)
-                    if !matches!(app.active_pane, ActivePane::Wizard | ActivePane::Plugin(_)) {
+                    // Plugin activation commands (global). Suppressed while
+                    // overlays that take full keyboard focus are live, so
+                    // e.g. Ctrl+T stays a picker nav key instead of triggering
+                    // a plugin that also binds Ctrl+T.
+                    if app.theme_picker.is_none()
+                        && !matches!(app.active_pane, ActivePane::Wizard | ActivePane::Plugin(_))
+                    {
                         if let Some(pane_id) = registry.pane_for_command(key) {
                             app.active_pane = ActivePane::Plugin(pane_id);
                             registry.set_active_pane(Some(pane_id));

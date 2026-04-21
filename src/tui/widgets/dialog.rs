@@ -16,6 +16,7 @@ pub fn render_help(
     area: Rect,
     registry: &PluginRegistry,
     active_pane: &ActivePane,
+    enter_progress: f32,
 ) {
     let [_, center_v, _] = Layout::vertical([
         Constraint::Percentage(15),
@@ -36,7 +37,7 @@ pub fn render_help(
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Theme::border_focused())
+        .border_style(Theme::border_ramp(enter_progress))
         .title(" Help ")
         .title_style(Theme::title());
 
@@ -50,6 +51,7 @@ pub fn render_help(
         ("F", "Log viewer"),
         ("F5", "Refresh channels now"),
         ("Ctrl+D", "Platform diagnostics"),
+        ("Ctrl+T", "Theme picker"),
         ("Esc", "Clear filter / go back"),
     ];
 
@@ -248,10 +250,11 @@ pub fn render_stopping(frame: &mut Frame, area: Rect, app: &AppState) {
 
     frame.render_widget(Clear, center);
 
+    let enter_progress = app.overlay_enter(crate::app::OverlayKey::Stopping, 0.18);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(Theme::red()))
+        .border_style(Style::new().fg(Theme::blend_for(Theme::dim(), Theme::red(), enter_progress)))
         .title(" Stopping Recordings ")
         .title_style(
             Style::new()
@@ -308,7 +311,7 @@ pub fn render_stopping(frame: &mut Frame, area: Rect, app: &AppState) {
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
-pub fn render_confirm(frame: &mut Frame, area: Rect, message: &str) {
+pub fn render_confirm(frame: &mut Frame, area: Rect, message: &str, enter_progress: f32) {
     let [_, center_v, _] = Layout::vertical([
         Constraint::Percentage(35),
         Constraint::Length(7),
@@ -325,10 +328,11 @@ pub fn render_confirm(frame: &mut Frame, area: Rect, message: &str) {
 
     frame.render_widget(Clear, center);
 
+    let border_color = Theme::blend_for(Theme::dim(), Theme::secondary(), enter_progress);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(Theme::secondary()))
+        .border_style(Style::new().fg(border_color))
         .title(" Confirm ")
         .title_style(Style::new().fg(Theme::secondary()).add_modifier(Modifier::BOLD));
 
