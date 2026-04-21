@@ -1,0 +1,19 @@
+# Keep GitHub language stats at 100% Rust by excluding non-source assets
+# from Linguist detection. These files are real and tracked — this only
+# affects the language breakdown shown on the repo page.
+
+.github/workflows/*.yml   linguist-vendored
+packaging/aur/PKGBUILD    linguist-vendored
+packaging/aur/.SRCINFO    linguist-generated
+contrib/systemd/*.service linguist-vendored
+*.toml.example            linguist-documentation
+.env.example              linguist-documentation
+
+# Normalize line endings for Rust sources and common text files
+*.rs         text eol=lf
+*.toml       text eol=lf
+*.md         text eol=lf
+*.yml        text eol=lf
+*.service    text eol=lf
+PKGBUILD     text eol=lf
+.SRCINFO     text eol=lf

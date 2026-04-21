@@ -46,6 +46,22 @@ strivo runs in your terminal (or as a background daemon) and watches your follow
 - Systemd service generation (`strivo daemon install`)
 
 **Plugins:**
+
+First-party plugins now live in the sibling repo
+[`revelri/strivo-plugins`](https://github.com/revelri/strivo-plugins) and are
+wired in here as a git submodule at `./strivo-plugins`. The core crate
+(`strivo-core`) defines the plugin trait; the binary crate
+(`crates/strivo-bin`) depends on the plugins crate via a path dep through the
+submodule. To pull everything in one go:
+
+```bash
+git clone --recurse-submodules https://github.com/revelri/strivo.git
+# or, after a plain clone:
+git submodule update --init
+```
+
+Currently shipped plugins:
+
 - **Crunchr** — AI transcription and analysis
   - Backends: Whisper CLI, Voxtral (vLLM/RunPod), Mistral API, OpenRouter
   - Tandem mode: auto-trigger transcription on recording completion
@@ -84,9 +100,17 @@ strivo              # first-run wizard
 ### From source
 
 ```bash
-git clone https://github.com/revelri/strivo.git
+git clone --recurse-submodules https://github.com/revelri/strivo.git
 cd strivo
 cargo build --release
+```
+
+If you cloned without `--recurse-submodules`, initialize the
+[`strivo-plugins`](https://github.com/revelri/strivo-plugins) submodule
+before building:
+
+```bash
+git submodule update --init
 ```
 
 Binary at `target/release/strivo`. Copy it to your PATH.
@@ -201,21 +225,27 @@ Twitch/YouTube/Patreon APIs
 ```
 
 ```
-src/
-  platform/          Trait-based abstraction (Twitch, YouTube, Patreon)
-  monitor/           Channel polling, go-live detection
-  recording/         Job lifecycle, FFmpeg/yt-dlp process management
-  stream/            URL resolution via streamlink/yt-dlp
-  playback/          mpv controller
-  plugin/            Plugin trait, registry, lifecycle
-    crunchr/         Transcription pipeline (Whisper/Mistral/Voxtral)
-    archiver/        Recording organization and gallery
-  tui/               ratatui rendering, event routing, themes
-    widgets/         Sidebar, channel detail, recordings, settings, wizard
-  daemon.rs          Background service, Unix socket listener
-  ipc.rs             Client-server protocol
-  config/            TOML config, OS keyring integration
+strivo/                        cargo workspace root
+├── src/                       strivo-core (library crate)
+│   ├── platform/              Trait-based abstraction (Twitch, YouTube, Patreon)
+│   ├── monitor/               Channel polling, go-live detection
+│   ├── recording/             Job lifecycle, FFmpeg/yt-dlp process management
+│   ├── stream/                URL resolution via streamlink/yt-dlp
+│   ├── playback/              mpv controller
+│   ├── plugin/                Plugin trait, registry, lifecycle
+│   ├── tui/                   ratatui rendering, event routing, themes
+│   │   └── widgets/           Sidebar, channel detail, recordings, settings, wizard
+│   ├── daemon.rs              Background service, Unix socket listener
+│   ├── ipc.rs                 Client-server protocol
+│   └── config/                TOML config, OS keyring integration
+├── crates/strivo-bin/         Binary crate (CLI, main.rs)
+└── strivo-plugins/            Submodule → revelri/strivo-plugins
+    └── src/                     Crunchr (transcription), Archiver (gallery)
 ```
+
+The dependency graph is strictly one-way:
+`strivo-core` ← `strivo-plugins` ← `strivo-bin`. The core crate has no
+awareness of concrete plugins; the binary pulls both together.
 
 ## Design Rationale
 
